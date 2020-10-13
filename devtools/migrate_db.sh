@@ -4,7 +4,10 @@
 # Use of this source code is governed by a BSD-style
 # license that can be found in the LICENSE file.
 
-source devtools/lib.sh || { echo "Are you at repo root?"; exit 1; }
+source devtools/lib.sh || {
+  echo "Are you at repo root?"
+  exit 1
+}
 
 usage() {
   cat <<EOUSAGE
@@ -42,4 +45,5 @@ case "$1" in
     usage
     exit 1
     ;;
+  # get migrate from https://github.com/golang-migrate/migrate/releases
 esac

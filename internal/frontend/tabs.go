@@ -46,6 +46,7 @@ var (
 		{
 			Name:         tabMain,
 			TemplateName: "unit_details.tmpl",
+			AlwaysShowDetails: true,
 		},
 		{
 			Name:         tabVersions,

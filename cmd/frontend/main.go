@@ -33,6 +33,7 @@ import (
 
 var (
 	queueName      = config.GetEnv("GO_DISCOVERY_FRONTEND_TASK_QUEUE", "")
+	listenAddr     = config.GetEnv("GO_LISTEN_ADDRESS", "localhost:8080")
 	workers        = flag.Int("workers", 10, "number of concurrent requests to the fetch service, when running locally")
 	_              = flag.String("static", "content/static", "path to folder containing static files served")
 	thirdPartyPath = flag.String("third_party", "third_party", "path to folder containing third-party libraries")
@@ -199,7 +200,7 @@ func main() {
 		middleware.Timeout(54*time.Second),
 		middleware.Experiment(experimenter),
 	)
-	addr := cfg.HostAddr("localhost:8080")
+	addr := cfg.HostAddr(listenAddr)
 	log.Infof(ctx, "Listening on addr %s", addr)
 	log.Fatal(ctx, http.ListenAndServe(addr, mw(router)))
 }
