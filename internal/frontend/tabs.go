@@ -36,9 +36,10 @@ type TabSettings struct {
 var (
 	packageTabSettings = []TabSettings{
 		{
-			Name:         tabDoc,
-			DisplayName:  "Doc",
-			TemplateName: "pkg_doc.tmpl",
+			Name:              tabDoc,
+			AlwaysShowDetails: true,
+			DisplayName:       "Doc",
+			TemplateName:      "pkg_doc.tmpl",
 		},
 		{
 			Name:              tabOverview,

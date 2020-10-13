@@ -4,7 +4,10 @@
 # Use of this source code is governed by a BSD-style
 # license that can be found in the LICENSE file.
 
-source devtools/lib.sh || { echo "Are you at repo root?"; exit 1; }
+source devtools/lib.sh || {
+  echo "Are you at repo root?"
+  exit 1
+}
 
 usage() {
   cat <<EOUSAGE
@@ -15,14 +18,15 @@ EOUSAGE
 # Redirect stderr to stdout because migrate outputs to stderr, and we want
 # to be able to use ordinary output redirection.
 case "$1" in
-  up|down|force|version)
-    migrate \
-      -source file:migrations \
-      -database "postgres://postgres@localhost:5432/discovery-db?sslmode=disable" \
-      "$@" 2>&1
-    ;;
-  *)
-    usage
-    exit 1
-    ;;
+up | down | force | version)
+  # get migrate from https://github.com/golang-migrate/migrate/releases
+  migrate \
+    -source file:migrations \
+    -database "postgres://pkgsite:$GO_DISCOVERY_DATABASE_PASSWORD@localhost:5432/pkgsite?sslmode=disable" \
+    "$@" 2>&1
+  ;;
+*)
+  usage
+  exit 1
+  ;;
 esac

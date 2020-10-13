@@ -1,0 +1,4 @@
+experiments:
+  - name: sidenav
+    rollout: 100
+    description: Display documentation index on the left sidenav.
