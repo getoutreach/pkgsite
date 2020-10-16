@@ -14,6 +14,9 @@ import (
 	"strings"
 
 	"github.com/google/safehtml"
+	"github.com/google/safehtml/template"
+	"golang.org/x/pkgsite/internal"
+	"golang.org/x/pkgsite/internal/experiment"
 	"golang.org/x/pkgsite/internal/godoc/internal/doc"
 )
 
@@ -36,6 +39,8 @@ type Renderer struct {
 	disableHotlinking bool
 	disablePermalinks bool
 	ctx               context.Context
+	docTmpl           *template.Template
+	exampleTmpl       *template.Template
 }
 
 type Options struct {
@@ -63,6 +68,60 @@ type Options struct {
 	DisablePermalinks bool
 }
 
+// docDataTmpl renders documentation. It expects a docData.
+var docDataTmpl = template.Must(template.New("").Parse(`
+{{- range .Elements -}}
+  {{- if .IsHeading -}}
+    <h4 id="{{.ID}}">{{.Title}}
+    {{- if not $.DisablePermalinks}}<a href="#{{.ID}}">¶</a>{{end -}}
+    </h4>
+  {{else if .IsPreformat -}}
+    <pre>{{.Body}}</pre>
+  {{- else -}}
+    <p>{{.Body}}</p>
+  {{- end -}}
+{{end}}`))
+
+// exampleTmpl renders code for an example. It expect an Example.
+var exampleTmpl = template.Must(template.New("").Parse(`
+<pre class="Documentation-exampleCode">
+{{range .}}
+  {{- if .Comment -}}
+    <span class="comment">{{.Text}}</span>
+  {{- else -}}
+    {{.Text}}
+  {{- end -}}
+{{end}}
+</pre>
+`))
+
+// legacyDocDataTmpl renders documentation. It expects a docData.
+var legacyDocDataTmpl = template.Must(template.New("").Parse(`
+{{- range .Elements -}}
+  {{- if .IsHeading -}}
+    <h3 id="{{.ID}}">{{.Title}}
+    {{- if not $.DisablePermalinks}}<a href="#{{.ID}}">¶</a>{{end -}}
+    </h3>
+  {{else if .IsPreformat -}}
+    <pre>{{.Body}}</pre>
+  {{- else -}}
+    <p>{{.Body}}</p>
+  {{- end -}}
+{{end}}`))
+
+// legacyExampleTmpl renders code for an example. It expect an Example.
+var legacyExampleTmpl = template.Must(template.New("").Parse(`
+<pre class="Documentation-exampleCode">
+{{range .}}
+  {{- if .Comment -}}
+    <span class="comment">{{.Text}}</span>
+  {{- else -}}
+    {{.Text}}
+  {{- end -}}
+{{end}}
+</pre>
+`))
+
 func New(ctx context.Context, fset *token.FileSet, pkg *doc.Package, opts *Options) *Renderer {
 	var others []*doc.Package
 	var packageURL func(string) string
@@ -79,12 +138,21 @@ func New(ctx context.Context, fset *token.FileSet, pkg *doc.Package, opts *Optio
 		disablePermalinks = opts.DisablePermalinks
 	}
 	pids := newPackageIDs(pkg, others...)
+
+	d := legacyDocDataTmpl
+	e := legacyExampleTmpl
+	if experiment.IsActive(ctx, internal.ExperimentUnitPage) {
+		d = docDataTmpl
+		e = exampleTmpl
+	}
 	return &Renderer{
 		fset:              fset,
 		pids:              pids,
 		packageURL:        packageURL,
 		disableHotlinking: disableHotlinking,
 		disablePermalinks: disablePermalinks,
+		docTmpl:           d,
+		exampleTmpl:       e,
 	}
 }
 

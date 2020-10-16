@@ -20,7 +20,7 @@ import (
 
 	"github.com/google/safehtml"
 	"github.com/google/safehtml/legacyconversions"
-	safetemplate "github.com/google/safehtml/template"
+	"github.com/google/safehtml/template"
 	"golang.org/x/pkgsite/internal/godoc/internal/doc"
 	"golang.org/x/pkgsite/internal/log"
 )
@@ -75,20 +75,6 @@ type docElement struct {
 	ID    safehtml.Identifier
 }
 
-// docTmpl renders documentation. It expects a docData.
-var docTmpl = safetemplate.Must(safetemplate.New("").Parse(`
-{{- range .Elements -}}
-  {{- if .IsHeading -}}
-    <h3 id="{{.ID}}">{{.Title}}
-    {{- if not $.DisablePermalinks}}<a href="#{{.ID}}">¶</a>{{end -}}
-    </h3>
-  {{else if .IsPreformat -}}
-    <pre>{{.Body}}</pre>
-  {{- else -}}
-    <p>{{.Body}}</p>
-  {{- end -}}
-{{end}}`))
-
 func (r *Renderer) declHTML(doc string, decl ast.Decl) (out struct{ Doc, Decl safehtml.HTML }) {
 	dids := newDeclIDs(decl)
 	idr := &identifierResolver{r.pids, dids, r.packageURL}
@@ -110,13 +96,13 @@ func (r *Renderer) declHTML(doc string, decl ast.Decl) (out struct{ Doc, Decl sa
 			}
 			els = append(els, el)
 		}
-		out.Doc = ExecuteToHTML(docTmpl, docData{Elements: els, DisablePermalinks: r.disablePermalinks})
+		out.Doc = ExecuteToHTML(r.docTmpl, docData{Elements: els, DisablePermalinks: r.disablePermalinks})
 	}
 	if decl != nil {
 		out.Decl = safehtml.HTMLConcat(
-			safetemplate.MustParseAndExecuteToHTML("<pre>\n"),
+			template.MustParseAndExecuteToHTML("<pre>\n"),
 			r.formatDeclHTML(decl, idr),
-			safetemplate.MustParseAndExecuteToHTML("</pre>\n"))
+			template.MustParseAndExecuteToHTML("</pre>\n"))
 	}
 	return out
 }
@@ -157,7 +143,7 @@ func (r *Renderer) codeHTML(ex *doc.Example) safehtml.HTML {
 	if err != nil {
 		log.Errorf(r.ctx, "Error converting *doc.Example into string: %v", err)
 	}
-	return codeHTML(codeStr)
+	return codeHTML(codeStr, r.exampleTmpl)
 }
 
 type codeElement struct {
@@ -165,19 +151,7 @@ type codeElement struct {
 	Comment bool
 }
 
-var codeTmpl = safetemplate.Must(safetemplate.New("").Parse(`
-<pre class="Documentation-exampleCode">
-{{range .}}
-  {{- if .Comment -}}
-    <span class="comment">{{.Text}}</span>
-  {{- else -}}
-    {{.Text}}
-  {{- end -}}
-{{end}}
-</pre>
-`))
-
-func codeHTML(src string) safehtml.HTML {
+func codeHTML(src string, codeTmpl *template.Template) safehtml.HTML {
 	var els []codeElement
 	// If code is an *ast.BlockStmt, then trim the braces.
 	var indent string
@@ -322,7 +296,7 @@ func (r *Renderer) formatLineHTML(line string, idr *identifierResolver) safehtml
 	return safehtml.HTMLConcat(htmls...)
 }
 
-func ExecuteToHTML(tmpl *safetemplate.Template, data interface{}) safehtml.HTML {
+func ExecuteToHTML(tmpl *template.Template, data interface{}) safehtml.HTML {
 	h, err := tmpl.ExecuteToHTML(data)
 	if err != nil {
 		return safehtml.HTMLEscaped("[" + err.Error() + "]")
@@ -410,9 +384,9 @@ scan:
 		case token.COMMENT:
 			tokType = commentType
 			htmlLines[line] = append(htmlLines[line],
-				safetemplate.MustParseAndExecuteToHTML(`<span class="comment">`),
+				template.MustParseAndExecuteToHTML(`<span class="comment">`),
 				r.formatLineHTML(lit, idr),
-				safetemplate.MustParseAndExecuteToHTML(`</span>`))
+				template.MustParseAndExecuteToHTML(`</span>`))
 			lastOffset += len(lit)
 		case token.IDENT:
 			if idIdx < len(anchorPoints) && anchorPoints[idIdx].ID.String() != "" {
@@ -462,7 +436,7 @@ scan:
 	return safehtml.HTMLConcat(htmls...)
 }
 
-var anchorTemplate = safetemplate.Must(safetemplate.New("anchor").Parse(`<span id="{{.ID}}" data-kind="{{.Kind}}"></span>`))
+var anchorTemplate = template.Must(template.New("anchor").Parse(`<span id="{{.ID}}" data-kind="{{.Kind}}"></span>`))
 
 // declVisitor is used to walk over the AST and trim large string
 // literals and arrays before package documentation is rendered.

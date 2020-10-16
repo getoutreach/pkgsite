@@ -145,10 +145,24 @@ const (
 	shortTTL = 10 * time.Minute
 	// longTTL is used when details content is essentially static.
 	longTTL = 24 * time.Hour
+	// tinyTTL is used to cache crawled pages.
+	tinyTTL = 1 * time.Minute
 )
+
+var crawlers = []string{
+	"+http://www.google.com/bot.html",
+	"+http://www.bing.com/bingbot.htm",
+	"+http://ahrefs.com/robot",
+}
 
 // detailsTTL assigns the cache TTL for package detail requests.
 func detailsTTL(r *http.Request) time.Duration {
+	userAgent := r.Header.Get("User-Agent")
+	for _, c := range crawlers {
+		if strings.Contains(userAgent, c) {
+			return tinyTTL
+		}
+	}
 	return detailsTTLForPath(r.Context(), r.URL.Path, r.FormValue("tab"))
 }
 
@@ -398,6 +412,8 @@ func (s *Server) renderErrorPage(ctx context.Context, status int, templateName s
 
 // servePage is used to execute all templates for a *Server.
 func (s *Server) servePage(ctx context.Context, w http.ResponseWriter, templateName string, page interface{}) {
+	defer middleware.ElapsedStat(ctx, "servePage")()
+
 	buf, err := s.renderPage(ctx, templateName, page)
 	if err != nil {
 		log.Errorf(ctx, "s.renderPage(%q, %+v): %v", templateName, page, err)
@@ -412,6 +428,8 @@ func (s *Server) servePage(ctx context.Context, w http.ResponseWriter, templateN
 
 // renderPage executes the given templateName with page.
 func (s *Server) renderPage(ctx context.Context, templateName string, page interface{}) ([]byte, error) {
+	defer middleware.ElapsedStat(ctx, "renderPage")()
+
 	tmpl, err := s.findTemplate(templateName)
 	if err != nil {
 		return nil, err

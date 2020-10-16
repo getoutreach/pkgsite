@@ -13,7 +13,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/golang-migrate/migrate/v4"
 	"golang.org/x/pkgsite/internal/database"
@@ -105,8 +104,7 @@ func ResetTestDB(db *DB, t *testing.T) {
 		if _, err := tx.Exec(ctx, `
 			TRUNCATE modules CASCADE;
 			TRUNCATE version_map;
-			TRUNCATE imports_unique;
-			TRUNCATE experiments;`); err != nil {
+			TRUNCATE imports_unique;`); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `TRUNCATE module_version_states CASCADE;`); err != nil {
@@ -115,11 +113,11 @@ func ResetTestDB(db *DB, t *testing.T) {
 		if _, err := tx.Exec(ctx, `TRUNCATE excluded_prefixes;`); err != nil {
 			return err
 		}
-		setExcludedPrefixesLastFetched(time.Time{})
 		return nil
 	}); err != nil {
 		t.Fatalf("error resetting test DB: %v", err)
 	}
+	db.expoller.Poll(ctx) // clear excluded prefixes
 }
 
 // RunDBTests is a wrapper that runs the given testing suite in a test database

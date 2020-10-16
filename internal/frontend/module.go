@@ -26,8 +26,8 @@ func (s *Server) serveModulePage(ctx context.Context, w http.ResponseWriter, r *
 	tab := r.FormValue("tab")
 	settings, ok := moduleTabLookup[tab]
 	if !ok {
-		tab = tabOverview
-		settings = moduleTabLookup[tabOverview]
+		tab = legacyTabOverview
+		settings = moduleTabLookup[legacyTabOverview]
 	}
 	canShowDetails := modHeader.IsRedistributable || settings.AlwaysShowDetails
 	var details interface{}
@@ -39,9 +39,9 @@ func (s *Server) serveModulePage(ctx context.Context, w http.ResponseWriter, r *
 			return fmt.Errorf("error fetching page for %q: %v", tab, err)
 		}
 	}
-	pageType := pageTypeModule
+	pageType := legacyPageTypeModule
 	if um.ModulePath == stdlib.ModulePath {
-		pageType = pageTypeModuleStd
+		pageType = legacyPageTypeModuleStd
 	}
 
 	page := &DetailsPage{

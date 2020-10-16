@@ -22,6 +22,7 @@ import (
 	"golang.org/x/pkgsite/internal/derrors"
 	"golang.org/x/pkgsite/internal/experiment"
 	"golang.org/x/pkgsite/internal/log"
+	"golang.org/x/pkgsite/internal/middleware"
 	"golang.org/x/pkgsite/internal/postgres"
 	"golang.org/x/pkgsite/internal/stdlib"
 )
@@ -64,12 +65,11 @@ type DetailsPage struct {
 }
 
 const (
-	pageTypeModule    = "mod"
-	pageTypeDirectory = "dir"
-	pageTypePackage   = "pkg"
-	pageTypeCommand   = "cmd"
-	pageTypeStdlib    = "stdlib"
-	pageTypeModuleStd = "std"
+	legacyPageTypeModule    = "mod"
+	legacyPageTypeDirectory = "dir"
+	legacyPageTypePackage   = "pkg"
+	legacyPageTypeCommand   = "cmd"
+	legacyPageTypeModuleStd = "std"
 )
 
 var (
@@ -93,6 +93,8 @@ var (
 // stdlib module pages are handled at "/std", and requests to "/mod/std" will
 // be redirected to that path.
 func (s *Server) serveDetails(w http.ResponseWriter, r *http.Request, ds internal.DataSource) (err error) {
+	defer middleware.ElapsedStat(r.Context(), "serveDetails")()
+
 	if r.Method != http.MethodGet {
 		return &serverError{status: http.StatusMethodNotAllowed}
 	}

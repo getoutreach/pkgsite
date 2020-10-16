@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"golang.org/x/mod/module"
 	"golang.org/x/pkgsite/internal"
 	"golang.org/x/pkgsite/internal/derrors"
 	"golang.org/x/pkgsite/internal/licenses"
@@ -118,21 +117,6 @@ func constructPackageURL(pkgPath, modulePath, linkVersion string) string {
 	return fmt.Sprintf("/%s@%s/%s", modulePath, linkVersion, strings.TrimPrefix(pkgPath, modulePath+"/"))
 }
 
-// effectiveName returns either the command name or package name.
-func effectiveName(pkgPath, pkgName string) string {
-	if pkgName != "main" {
-		return pkgName
-	}
-	var prefix string // package path without version
-	if pkgPath[len(pkgPath)-3:] == "/v1" {
-		prefix = pkgPath[:len(pkgPath)-3]
-	} else {
-		prefix, _, _ = module.SplitPathVersion(pkgPath)
-	}
-	_, base := path.Split(prefix)
-	return base
-}
-
 // packageHTMLTitle constructs the details page title for pkg.
 // The string will appear in the <title> element (and thus
 // the browser tab).
@@ -141,65 +125,6 @@ func packageHTMLTitle(pkgPath, pkgName string) string {
 		return pkgName + " package"
 	}
 	return effectiveName(pkgPath, pkgName) + " command"
-}
-
-type breadcrumb struct {
-	Links    []link
-	Current  string
-	CopyData string
-}
-
-type link struct {
-	Href, Body string
-}
-
-// breadcrumbPath builds HTML that displays pkgPath as a sequence of links
-// to its parents.
-// pkgPath is a slash-separated path, and may be a package import path or a directory.
-// modPath is the package's module path. This will be a prefix of pkgPath, except
-// within the standard library.
-// version is the version for the module, or LatestVersion.
-//
-// See TestBreadcrumbPath for examples.
-func breadcrumbPath(pkgPath, modPath, requestedVersion string) breadcrumb {
-	if pkgPath == stdlib.ModulePath {
-		return breadcrumb{Current: "Standard library"}
-	}
-	// Obtain successive prefixes of pkgPath, stopping at modPath,
-	// or for the stdlib, at the end.
-	minLen := len(modPath) - 1
-	if modPath == stdlib.ModulePath {
-		minLen = 1
-	}
-	var dirs []string
-	for dir := pkgPath; len(dir) > minLen && len(path.Dir(dir)) < len(dir); dir = path.Dir(dir) {
-		dirs = append(dirs, dir)
-	}
-	// Construct the path elements of the result.
-	// They will be in reverse order of dirs.
-	// The first dir is the current page. If it is the only one, leave it
-	// as is. Otherwise, use its base. In neither case does it get a link.
-	d := dirs[0]
-	if len(dirs) > 1 {
-		d = path.Base(d)
-	}
-	b := breadcrumb{Current: d}
-	// Make all the other parts into links.
-	b.Links = make([]link, len(dirs)-1)
-	for i := 1; i < len(dirs); i++ {
-		href := "/" + dirs[i]
-		if requestedVersion != internal.LatestVersion {
-			href += "@" + linkVersion(requestedVersion, modPath)
-		}
-		el := dirs[i]
-		if i != len(dirs)-1 {
-			el = path.Base(el)
-		}
-		b.Links[len(b.Links)-i] = link{href, el}
-	}
-	// Add a "copy" button for the path.
-	b.CopyData = pkgPath
-	return b
 }
 
 // moduleHTMLTitle constructs the <title> contents, for tabs in the browser.
