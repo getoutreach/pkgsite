@@ -34,14 +34,6 @@
       {{if .ReadMe.String}}
           <div class="Overview-readmeContent">{{.ReadMe}}</div>
           <div class="Overview-readmeSource">Source: {{.ReadMeSource}}</div>
-      {{else if not .Redistributable}}
-        <div>
-          <img class="EmptyContent-gopher" src="/static/img/gopher-airplane.svg" alt="The Go Gopher">
-          <h3 class="EmptyContent-message">
-            README not displayed due to license restrictions.
-	    See our <a href="/license-policy">license policy</a>.
-          </h3>
-        </div>
       {{else}}
         {{template "empty_content" "No README found for this package!"}}
       {{end}}

@@ -22,7 +22,7 @@ up | down | force | version)
   # get migrate from https://github.com/golang-migrate/migrate/releases
   migrate \
     -source file:migrations \
-    -database "postgres://pkgsite:$GO_DISCOVERY_DATABASE_PASSWORD@localhost:5432/pkgsite?sslmode=disable" \
+    -database "postgres://outreach:$GO_DISCOVERY_DATABASE_PASSWORD@localhost:5432/pkgsite?sslmode=disable" \
     "$@" 2>&1
   ;;
 *)
