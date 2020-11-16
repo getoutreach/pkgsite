@@ -17,14 +17,14 @@ func (m *Module) RemoveNonRedistributableData() {
 }
 
 func (u *Unit) RemoveNonRedistributableData() {
-	if !u.IsRedistributable {
-		u.Readme = nil
-		u.Documentation = nil
-	}
+	// if !u.IsRedistributable {
+	// 	u.Readme = nil
+	// 	u.Documentation = nil
+	// }
 }
 
 func (p *PackageMeta) RemoveNonRedistributableData() {
-	if !p.IsRedistributable {
-		p.Synopsis = ""
-	}
+	// if !p.IsRedistributable {
+	// 	p.Synopsis = ""
+	// }
 }
