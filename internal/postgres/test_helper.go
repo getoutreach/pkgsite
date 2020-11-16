@@ -103,6 +103,7 @@ func ResetTestDB(db *DB, t *testing.T) {
 	if err := db.db.Transact(ctx, sql.LevelDefault, func(tx *database.DB) error {
 		if _, err := tx.Exec(ctx, `
 			TRUNCATE modules CASCADE;
+			TRUNCATE search_documents;
 			TRUNCATE version_map;
 			TRUNCATE imports_unique;`); err != nil {
 			return err
@@ -211,10 +212,7 @@ func InsertSampleDirectoryTree(ctx context.Context, t *testing.T, testDB *DB) {
 			},
 		},
 	} {
-		m := sample.LegacyModule(data.modulePath, data.version, data.suffixes...)
-		for _, p := range m.LegacyPackages {
-			p.Imports = nil
-		}
+		m := sample.Module(data.modulePath, data.version, data.suffixes...)
 		if err := testDB.InsertModule(ctx, m); err != nil {
 			t.Fatal(err)
 		}

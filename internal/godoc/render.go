@@ -37,6 +37,10 @@ var MaxDocumentationHTML = 20 * megabyte
 
 var noDocTemplate = template.Must(template.New("").Parse(`<p>No documentation for GOOS/GOARCH {{.}}</p>`))
 
+// A Renderer renders documentation for a Package.
+type Renderer struct {
+}
+
 // Render renders the documentation for the package.
 // Rendering destroys p's AST; do not call any methods of p after it returns.
 func (p *Package) Render(ctx context.Context, innerPath string, sourceInfo *source.Info, modInfo *ModuleInfo, goos, goarch string) (synopsis string, imports []string, html safehtml.HTML, err error) {
@@ -53,6 +57,25 @@ func (p *Package) Render(ctx context.Context, innerPath string, sourceInfo *sour
 		}
 		return "No documentation.", nil, html, errors.New("no doc")
 	}
+	d, err := p.docPackage(innerPath, modInfo)
+	if err != nil {
+		return "", nil, safehtml.HTML{}, err
+	}
+
+	// Render documentation HTML.
+	opts := p.renderOptions(innerPath, sourceInfo, modInfo)
+	docHTML, err := dochtml.Render(ctx, p.Fset, d, opts)
+	if errors.Is(err, ErrTooLarge) {
+		docHTML = template.MustParseAndExecuteToHTML(docTooLargeReplacement)
+	} else if err != nil {
+		return "", nil, safehtml.HTML{}, fmt.Errorf("dochtml.Render: %v", err)
+	}
+	return doc.Synopsis(d.Doc), d.Imports, docHTML, err
+}
+
+// docPackage computes and returns a doc.Package.
+func (p *Package) docPackage(innerPath string, modInfo *ModuleInfo) (_ *doc.Package, err error) {
+	defer derrors.Wrap(&err, "docPackage(%q, %q, %q)", innerPath, modInfo.ModulePath, modInfo.ResolvedVersion)
 	importPath := path.Join(modInfo.ModulePath, innerPath)
 	if modInfo.ModulePath == stdlib.ModulePath {
 		importPath = innerPath
@@ -82,7 +105,7 @@ func (p *Package) Render(ctx context.Context, innerPath string, sourceInfo *sour
 	}
 	d, err := doc.NewFromFiles(p.Fset, allGoFiles, importPath, m)
 	if err != nil {
-		return "", nil, safehtml.HTML{}, fmt.Errorf("doc.NewFromFiles: %v", err)
+		return nil, fmt.Errorf("doc.NewFromFiles: %v", err)
 	}
 
 	if d.ImportPath != importPath {
@@ -99,10 +122,13 @@ func (p *Package) Render(ctx context.Context, innerPath string, sourceInfo *sour
 
 	// Process package imports.
 	if len(d.Imports) > maxImportsPerPackage {
-		return "", nil, safehtml.HTML{}, fmt.Errorf("%d imports found package %q; exceeds limit %d for maxImportsPerPackage", len(d.Imports), importPath, maxImportsPerPackage)
+		return nil, fmt.Errorf("%d imports found package %q; exceeds limit %d for maxImportsPerPackage", len(d.Imports), importPath, maxImportsPerPackage)
 	}
+	return d, nil
+}
 
-	// Render documentation HTML.
+// renderOptions returns a RenderOptions for p.
+func (p *Package) renderOptions(innerPath string, sourceInfo *source.Info, modInfo *ModuleInfo) dochtml.RenderOptions {
 	sourceLinkFunc := func(n ast.Node) string {
 		if sourceInfo == nil {
 			return ""
@@ -120,16 +146,30 @@ func (p *Package) Render(ctx context.Context, innerPath string, sourceInfo *sour
 		return sourceInfo.FileURL(path.Join(innerPath, filename))
 	}
 
-	docHTML, err := dochtml.Render(ctx, p.Fset, d, dochtml.RenderOptions{
+	return dochtml.RenderOptions{
 		FileLinkFunc:   fileLinkFunc,
 		SourceLinkFunc: sourceLinkFunc,
 		ModInfo:        modInfo,
 		Limit:          int64(MaxDocumentationHTML),
-	})
-	if errors.Is(err, ErrTooLarge) {
-		docHTML = template.MustParseAndExecuteToHTML(docTooLargeReplacement)
-	} else if err != nil {
-		return "", nil, safehtml.HTML{}, fmt.Errorf("dochtml.Render: %v", err)
 	}
-	return doc.Synopsis(d.Doc), d.Imports, docHTML, err
+}
+
+// RenderParts renders the documentation for the package in parts.
+// Rendering destroys p's AST; do not call any methods of p after it returns.
+func (p *Package) RenderParts(ctx context.Context, innerPath string, sourceInfo *source.Info, modInfo *ModuleInfo) (body, outline, mobileOutline safehtml.HTML, err error) {
+	p.renderCalled = true
+
+	d, err := p.docPackage(innerPath, modInfo)
+	if err != nil {
+		return safehtml.HTML{}, safehtml.HTML{}, safehtml.HTML{}, err
+	}
+	opts := p.renderOptions(innerPath, sourceInfo, modInfo)
+	b, o, m, err := dochtml.RenderParts(ctx, p.Fset, d, opts)
+	if errors.Is(err, ErrTooLarge) {
+		return template.MustParseAndExecuteToHTML(docTooLargeReplacement), safehtml.HTML{}, safehtml.HTML{}, err
+	}
+	if err != nil {
+		return safehtml.HTML{}, safehtml.HTML{}, safehtml.HTML{}, fmt.Errorf("dochtml.Render: %v", err)
+	}
+	return b, o, m, nil
 }

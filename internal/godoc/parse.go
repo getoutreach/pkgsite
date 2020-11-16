@@ -9,13 +9,15 @@
 package godoc
 
 import (
+	"context"
 	"fmt"
 	"regexp"
+	"strings"
 
 	"github.com/google/safehtml"
 	"github.com/google/safehtml/uncheckedconversions"
 	"golang.org/x/pkgsite/internal/derrors"
-	"golang.org/x/pkgsite/internal/godoc/dochtml"
+	"golang.org/x/pkgsite/internal/middleware"
 )
 
 // SectionType is a section of the docHTML.
@@ -36,17 +38,47 @@ const (
 	BodySection
 )
 
-// Parse return the section of docHTML specified by section. It is expected that
+const (
+	IdentifierBodyStart          = `<div class="Documentation-content js-docContent">`
+	IdentifierBodyEnd            = `</div>`
+	IdentifierSidenavStart       = `<nav class="DocNav js-sideNav">`
+	IdentifierSidenavMobileStart = `<nav class="DocNavMobile js-mobileNav">`
+	IdentifierSidenavEnd         = `</nav>`
+)
+
+// ParseDoc splits docHTML into sections.
+func ParseDoc(ctx context.Context, docHTML safehtml.HTML) (body, outline, mobileOutline safehtml.HTML, err error) {
+	// TODO: Deprecate this. The sidenav and body can
+	// either be rendered using separate functions, or all this content can
+	// be passed to the template via the UnitPage struct.
+	defer middleware.ElapsedStat(ctx, "godoc.ParseDoc")()
+	b, err := parse(docHTML, BodySection)
+	if err != nil {
+		return safehtml.HTML{}, safehtml.HTML{}, safehtml.HTML{}, err
+	}
+	o, err := parse(docHTML, SidenavSection)
+	if err != nil {
+		return safehtml.HTML{}, safehtml.HTML{}, safehtml.HTML{}, err
+	}
+	m, err := parse(docHTML, SidenavMobileSection)
+	if err != nil {
+		return safehtml.HTML{}, safehtml.HTML{}, safehtml.HTML{}, err
+	}
+	o = uncheckedconversions.HTMLFromStringKnownToSatisfyTypeContract(strings.TrimSuffix(o.String(), m.String()))
+	return b, o, m, nil
+}
+
+// parse returns the section of docHTML specified by section. It is expected that
 // docHTML was generated using the template in internal/fetch/dochtml.
-func Parse(docHTML safehtml.HTML, section SectionType) (_ safehtml.HTML, err error) {
+func parse(docHTML safehtml.HTML, section SectionType) (_ safehtml.HTML, err error) {
 	defer derrors.Wrap(&err, "Parse(docHTML, %q)", section)
 	switch section {
 	case SidenavSection:
-		return findHTML(docHTML, dochtml.IdentifierSidenavStart)
+		return findHTML(docHTML, IdentifierSidenavStart)
 	case SidenavMobileSection:
-		return findHTML(docHTML, dochtml.IdentifierSidenavMobileStart)
+		return findHTML(docHTML, IdentifierSidenavMobileStart)
 	case BodySection:
-		return findHTML(docHTML, dochtml.IdentifierBodyStart)
+		return findHTML(docHTML, IdentifierBodyStart)
 	default:
 		return safehtml.HTML{}, derrors.NotFound
 	}
@@ -56,10 +88,10 @@ func findHTML(docHTML safehtml.HTML, identifier string) (_ safehtml.HTML, err er
 	defer derrors.Wrap(&err, "findHTML(%q)", identifier)
 	var closeTag string
 	switch identifier {
-	case dochtml.IdentifierBodyStart:
-		closeTag = dochtml.IdentifierBodyEnd
+	case IdentifierBodyStart:
+		closeTag = IdentifierBodyEnd
 	default:
-		closeTag = dochtml.IdentifierSidenavEnd
+		closeTag = IdentifierSidenavEnd
 	}
 
 	// The regex is greedy, so it will capture the last matching closeTag in

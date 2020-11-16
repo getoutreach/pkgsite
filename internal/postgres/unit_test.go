@@ -23,12 +23,11 @@ import (
 func TestGetUnit(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
-
 	defer ResetTestDB(testDB, t)
 	InsertSampleDirectoryTree(ctx, t, testDB)
 
 	// Add a module that has READMEs in a directory and a package.
-	m := sample.LegacyModule("a.com/m", "v1.2.3", "dir/p")
+	m := sample.Module("a.com/m", "v1.2.3", "dir/p")
 	d := findDirectory(m, "a.com/m/dir")
 	d.Readme = &internal.Readme{
 		Filepath: "DIR_README.md",
@@ -161,10 +160,13 @@ func TestGetUnit(t *testing.T) {
 				test.want.Name,
 				test.want.IsRedistributable,
 			)
-			t.Run("unit-page", func(t *testing.T) {
+			t.Run("unit page with one query", func(t *testing.T) {
+				checkUnit(ctx, t, um, test.want, internal.ExperimentUnitPage, internal.ExperimentGetUnitWithOneQuery)
+			})
+			t.Run("unit page", func(t *testing.T) {
 				checkUnit(ctx, t, um, test.want, internal.ExperimentUnitPage)
 			})
-			t.Run("no-experiments", func(t *testing.T) {
+			t.Run("no experiments", func(t *testing.T) {
 				test.want.Readme = &internal.Readme{
 					Filepath: sample.ReadmeFilePath,
 					Contents: sample.ReadmeContents,
@@ -188,8 +190,16 @@ func checkUnit(ctx context.Context, t *testing.T, um *internal.UnitMeta, want *i
 		cmpopts.IgnoreFields(licenses.Metadata{}, "Coverage"),
 	}
 	want.SourceInfo = um.SourceInfo
-	if diff := cmp.Diff(want, got, opts...); diff != "" {
-		t.Errorf("mismatch (-want, +got):\n%s", diff)
+	if experiment.IsActive(ctx, internal.ExperimentGetUnitWithOneQuery) {
+		want.NumImports = len(want.Imports)
+		opts = append(opts,
+			cmpopts.IgnoreFields(internal.Documentation{}, "HTML"),
+			cmpopts.IgnoreFields(internal.Unit{}, "Imports"),
+			cmpopts.IgnoreFields(internal.Unit{}, "LicenseContents"),
+		)
+		if diff := cmp.Diff(want, got, opts...); diff != "" {
+			t.Errorf("mismatch (-want, +got):\n%s", diff)
+		}
 	}
 }
 
@@ -200,7 +210,7 @@ func TestGetUnitFieldSet(t *testing.T) {
 	defer ResetTestDB(testDB, t)
 
 	// Add a module that has READMEs in a directory and a package.
-	m := sample.LegacyModule("a.com/m", "v1.2.3", "dir/p")
+	m := sample.Module("a.com/m", "v1.2.3", "dir/p")
 	if err := testDB.InsertModule(ctx, m); err != nil {
 		t.Fatal(err)
 	}
@@ -212,6 +222,7 @@ func TestGetUnitFieldSet(t *testing.T) {
 		}
 		if fields&internal.WithImports != 0 {
 			u.Imports = sample.Imports
+			u.NumImports = len(sample.Imports)
 		}
 		if fields&internal.WithLicenses == 0 {
 			u.LicenseContents = nil
@@ -291,6 +302,7 @@ func unit(fullPath, modulePath, version, name string, readme *internal.Readme, s
 	u.Subdirectories = subdirectories(modulePath, suffixes)
 	if u.IsPackage() {
 		u.Imports = sample.Imports
+		u.NumImports = len(sample.Imports)
 		u.Documentation = sample.Documentation
 	}
 	return u

@@ -60,11 +60,11 @@ func TestFrontendDocRender(t *testing.T) {
 
 	// Process with saving the source.
 	processVersions(
-		experiment.NewContext(context.Background(), internal.ExperimentUnitPage, internal.ExperimentRemoveUnusedAST, internal.ExperimentInsertPackageSource),
+		experiment.NewContext(context.Background(), internal.ExperimentUnitPage, internal.ExperimentRemoveUnusedAST),
 		t, []*proxy.Module{m})
 
 	workerDoc := getDoc(t, m.ModulePath)
-	frontendDoc := getDoc(t, m.ModulePath, internal.ExperimentUnitPage, internal.ExperimentFrontendRenderDoc, internal.ExperimentInsertPackageSource)
+	frontendDoc := getDoc(t, m.ModulePath, internal.ExperimentUnitPage, internal.ExperimentFrontendRenderDoc)
 	if diff := cmp.Diff(workerDoc, frontendDoc); diff != "" {
 		t.Errorf("mismatch (-worker, +frontend):\n%s", diff)
 	}
@@ -72,7 +72,7 @@ func TestFrontendDocRender(t *testing.T) {
 
 func getDoc(t *testing.T, modulePath string, exps ...string) string {
 	ctx := experiment.NewContext(context.Background(),
-		append(exps, internal.ExperimentSidenav, internal.ExperimentUnitPage)...)
+		append(exps, internal.ExperimentUnitPage)...)
 	ts := setupFrontend(ctx, t, nil)
 	url := ts.URL + "/" + modulePath
 	resp, err := http.Get(url)
@@ -87,11 +87,14 @@ func getDoc(t *testing.T, modulePath string, exps ...string) string {
 	if err != nil {
 		t.Fatalf("%s: %v", url, err)
 	}
-	// Remove surrounding whitespace from lines.
+	// Remove surrounding whitespace from lines, and blank lines.
 	scan := bufio.NewScanner(bytes.NewReader(content))
 	var b strings.Builder
 	for scan.Scan() {
-		fmt.Fprintln(&b, strings.TrimSpace(scan.Text()))
+		line := strings.TrimSpace(scan.Text())
+		if len(line) > 0 {
+			fmt.Fprintln(&b, line)
+		}
 	}
 	if scan.Err() != nil {
 		t.Fatal(scan.Err())

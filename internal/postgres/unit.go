@@ -25,8 +25,11 @@ import (
 // TODO(golang/go#39629): remove pID.
 func (db *DB) GetUnit(ctx context.Context, um *internal.UnitMeta, fields internal.FieldSet) (_ *internal.Unit, err error) {
 	defer derrors.Wrap(&err, "GetUnit(ctx, %q, %q, %q)", um.Path, um.ModulePath, um.Version)
-	defer middleware.ElapsedStat(ctx, "GetUnit")()
+	if experiment.IsActive(ctx, internal.ExperimentGetUnitWithOneQuery) && fields&internal.WithDocumentation|fields&internal.WithReadme != 0 {
+		return db.getUnitWithAllFields(ctx, um)
+	}
 
+	defer middleware.ElapsedStat(ctx, "GetUnit")()
 	pathID, err := db.getPathID(ctx, um.Path, um.ModulePath, um.Version)
 	if err != nil {
 		return nil, err
@@ -59,6 +62,7 @@ func (db *DB) GetUnit(ctx context.Context, um *internal.UnitMeta, fields interna
 		}
 		if len(imports) > 0 {
 			u.Imports = imports
+			u.NumImports = len(imports)
 		}
 	}
 	if fields&internal.WithLicenses != 0 {
@@ -89,7 +93,7 @@ func (db *DB) getPathID(ctx context.Context, fullPath, modulePath, resolvedVersi
 	var pathID int
 	query := `
 		SELECT p.id
-		FROM paths p
+		FROM units p
 		INNER JOIN modules m ON (p.module_id = m.id)
 		WHERE
 		    p.path = $1
@@ -123,7 +127,7 @@ func (db *DB) getDocumentation(ctx context.Context, pathID int) (_ *internal.Doc
 			d.source
 		FROM documentation d
 		WHERE
-		    d.path_id=$1;`, pathID).Scan(
+		    d.unit_id=$1;`, pathID).Scan(
 		database.NullIsEmpty(&doc.GOOS),
 		database.NullIsEmpty(&doc.GOARCH),
 		database.NullIsEmpty(&doc.Synopsis),
@@ -149,7 +153,7 @@ func (db *DB) getReadme(ctx context.Context, pathID int) (_ *internal.Readme, er
 	err = db.db.QueryRow(ctx, `
 		SELECT file_path, contents
 		FROM readmes
-		WHERE path_id=$1;`, pathID).Scan(&readme.Filepath, &readme.Contents)
+		WHERE unit_id=$1;`, pathID).Scan(&readme.Filepath, &readme.Contents)
 	switch err {
 	case sql.ErrNoRows:
 		return nil, derrors.NotFound
@@ -167,10 +171,10 @@ func (db *DB) getModuleReadme(ctx context.Context, modulePath, resolvedVersion s
 	err = db.db.QueryRow(ctx, `
 		SELECT file_path, contents
 		FROM modules m
-		INNER JOIN paths p
+		INNER JOIN units p
 		ON p.module_id = m.id
 		INNER JOIN readmes r
-		ON p.id = r.path_id
+		ON p.id = r.unit_id
 		WHERE
 		    m.module_path=$1
 			AND m.version=$2
@@ -201,7 +205,7 @@ func (db *DB) getImports(ctx context.Context, pathID int) (_ []string, err error
 	if err := db.db.RunQuery(ctx, `
 		SELECT to_path
 		FROM package_imports
-		WHERE path_id = $1`, collect, pathID); err != nil {
+		WHERE unit_id = $1`, collect, pathID); err != nil {
 		return nil, err
 	}
 	return imports, nil
@@ -222,10 +226,10 @@ func (db *DB) getPackagesInUnit(ctx context.Context, fullPath, modulePath, resol
 			p.license_types,
 			p.license_paths
 		FROM modules m
-		INNER JOIN paths p
+		INNER JOIN units p
 		ON p.module_id = m.id
 		INNER JOIN documentation d
-		ON d.path_id = p.id
+		ON d.unit_id = p.id
 		WHERE
 			m.module_path = $1
 			AND m.version = $2
@@ -268,4 +272,78 @@ func (db *DB) getPackagesInUnit(ctx context.Context, fullPath, modulePath, resol
 		}
 	}
 	return packages, nil
+}
+
+func (db *DB) getUnitWithAllFields(ctx context.Context, um *internal.UnitMeta) (_ *internal.Unit, err error) {
+	defer derrors.Wrap(&err, "getUnitWithAllFields(ctx, %q, %q, %q)", um.Path, um.ModulePath, um.Version)
+	defer middleware.ElapsedStat(ctx, "getUnitWithAllFields")()
+
+	query := `
+        SELECT
+			d.goos,
+			d.goarch,
+			d.synopsis,
+			d.source,
+			r.file_path,
+			r.contents,
+			COALESCE((
+				SELECT COUNT(unit_id)
+				FROM package_imports
+				WHERE unit_id = p.id
+				GROUP BY unit_id
+				), 0) AS num_imports,
+			COALESCE((
+				SELECT imported_by_count
+				FROM search_documents
+				-- Only package_path is needed b/c it is the PK for
+				-- search_documents.
+				WHERE package_path = $1
+				), 0) AS num_imported_by
+		FROM units p
+		INNER JOIN modules m
+		ON p.module_id = m.id
+		LEFT JOIN documentation d
+		ON d.unit_id = p.id
+		LEFT JOIN readmes r
+		ON r.unit_id = p.id
+		WHERE
+			p.path = $1
+			AND m.module_path = $2
+			AND m.version = $3;`
+
+	var (
+		d internal.Documentation
+		r internal.Readme
+		u internal.Unit
+	)
+	err = db.db.QueryRow(ctx, query, um.Path, um.ModulePath, um.Version).Scan(
+		database.NullIsEmpty(&d.GOOS),
+		database.NullIsEmpty(&d.GOARCH),
+		database.NullIsEmpty(&d.Synopsis),
+		&d.Source,
+		database.NullIsEmpty(&r.Filepath),
+		database.NullIsEmpty(&r.Contents),
+		&u.NumImports,
+		&u.NumImportedBy,
+	)
+	switch err {
+	case sql.ErrNoRows:
+		return nil, derrors.NotFound
+	case nil:
+		if d.GOOS != "" {
+			u.Documentation = &d
+		}
+		if r.Filepath != "" {
+			u.Readme = &r
+		}
+	default:
+		return nil, err
+	}
+	pkgs, err := db.getPackagesInUnit(ctx, um.Path, um.ModulePath, um.Version)
+	if err != nil {
+		return nil, err
+	}
+	u.Subdirectories = pkgs
+	u.UnitMeta = *um
+	return &u, nil
 }

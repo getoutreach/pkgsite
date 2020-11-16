@@ -11,13 +11,28 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/safehtml/template"
+	"golang.org/x/pkgsite/internal"
+	"golang.org/x/pkgsite/internal/experiment"
+	"golang.org/x/pkgsite/internal/godoc/dochtml"
 	"golang.org/x/pkgsite/internal/source"
 	"golang.org/x/pkgsite/internal/testing/sample"
 )
 
-func TestRender(t *testing.T) {
-	ctx := context.Background()
+var templateSource = template.TrustedSourceFromConstant("../../content/static/html/doc")
 
+func TestRender(t *testing.T) {
+	dochtml.LoadTemplates(templateSource)
+	ctx := context.Background()
+	t.Run("gob", func(t *testing.T) {
+		testRender(t, ctx)
+	})
+	t.Run("fast", func(t *testing.T) {
+		testRender(t, experiment.NewContext(ctx, internal.ExperimentFasterDecoding))
+	})
+}
+
+func testRender(t *testing.T, ctx context.Context) {
 	si := source.NewGitHubInfo(sample.ModulePath, "", "abcde")
 	mi := &ModuleInfo{
 		ModulePath:      sample.ModulePath,
@@ -71,7 +86,7 @@ func TestRender(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	bytes, err := p.Encode()
+	bytes, err := p.Encode(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}

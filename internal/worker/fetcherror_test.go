@@ -87,7 +87,6 @@ func TestFetchAndUpdateState_NotFound(t *testing.T) {
 	}
 	checkNotInTable("search_documents", "module_path")
 	checkNotInTable("imports_unique", "from_module_path")
-	checkNotInTable("imports", "from_module_path")
 }
 
 func TestFetchAndUpdateState_Excluded(t *testing.T) {
@@ -288,7 +287,7 @@ func TestFetchAndUpdateState_ProxyTimedOut(t *testing.T) {
 // This makes it viable for us to show documentation for packages that
 // would otherwise exceed HTML size limit and not get shown at all.
 func TestTrimLargeCode(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout*2)
 	defer cancel()
 	defer postgres.ResetTestDB(testDB, t)
 	trimmedModule := map[string]string{

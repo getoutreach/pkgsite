@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"hash/fnv"
 	"io"
-	"runtime"
 	"sort"
 	"strings"
 	"unicode/utf8"
@@ -24,7 +23,6 @@ import (
 	"golang.org/x/pkgsite/internal"
 	"golang.org/x/pkgsite/internal/database"
 	"golang.org/x/pkgsite/internal/derrors"
-	"golang.org/x/pkgsite/internal/experiment"
 	"golang.org/x/pkgsite/internal/log"
 	"golang.org/x/pkgsite/internal/stdlib"
 	"golang.org/x/pkgsite/internal/version"
@@ -56,9 +54,6 @@ func (db *DB) InsertModule(ctx context.Context, m *internal.Module) (err error) 
 	if err := db.compareLicenses(ctx, m); err != nil {
 		return err
 	}
-	if err := db.comparePackages(ctx, m); err != nil {
-		return err
-	}
 	if err := db.comparePaths(ctx, m); err != nil {
 		return err
 	}
@@ -81,28 +76,17 @@ func (db *DB) saveModule(ctx context.Context, m *internal.Module) (err error) {
 	ctx, span := trace.StartSpan(ctx, "saveModule")
 	defer span.End()
 
-	logMemory(ctx, "at start of saveModule")
 	return db.db.Transact(ctx, sql.LevelDefault, func(tx *database.DB) error {
 		moduleID, err := insertModule(ctx, tx, m)
 		if err != nil {
 			return err
 		}
-		logMemory(ctx, "after insertModule")
-
 		if err := insertLicenses(ctx, tx, m, moduleID); err != nil {
 			return err
 		}
-
-		logMemory(ctx, "after insertLicenses")
-		if err := legacyInsertPackages(ctx, tx, m); err != nil {
+		if err := db.insertUnits(ctx, tx, m, moduleID); err != nil {
 			return err
 		}
-		logMemory(ctx, "after insertPackages")
-
-		if err := insertUnits(ctx, tx, m, moduleID); err != nil {
-			return err
-		}
-		logMemory(ctx, "after insertUnits")
 
 		// Obtain a transaction-scoped exclusive advisory lock on the module
 		// path. The transaction that holds the lock is the only one that can
@@ -158,7 +142,7 @@ func (db *DB) saveModule(ctx context.Context, m *internal.Module) (err error) {
 			return err
 		}
 		// Insert the module's packages into search_documents.
-		return upsertSearchDocuments(ctx, tx, m)
+		return db.upsertSearchDocuments(ctx, tx, m)
 	})
 }
 
@@ -235,103 +219,7 @@ func insertLicenses(ctx context.Context, db *database.DB, m *internal.Module, mo
 			"module_id",
 		}
 		return db.BulkUpsert(ctx, "licenses", licenseCols, licenseValues,
-			[]string{"module_path", "version", "file_path"})
-	}
-	return nil
-}
-
-func legacyInsertPackages(ctx context.Context, db *database.DB, m *internal.Module) (err error) {
-	ctx, span := trace.StartSpan(ctx, "insertPackages")
-	defer span.End()
-	defer derrors.Wrap(&err, "insertPackages(ctx, %q, %q)", m.ModulePath, m.Version)
-
-	// Sort to ensure proper lock ordering, avoiding deadlocks. See
-	// b/141164828#comment8. The only deadlocks we've actually seen are on
-	// imports_unique, because they can occur when processing two versions of
-	// the same module, which happens regularly. But if we were ever to process
-	// the same module and version twice, we could see deadlocks in the other
-	// bulk inserts.
-	sort.Slice(m.LegacyPackages, func(i, j int) bool {
-		return m.LegacyPackages[i].Path < m.LegacyPackages[j].Path
-	})
-	sort.Slice(m.Licenses, func(i, j int) bool {
-		return m.Licenses[i].FilePath < m.Licenses[j].FilePath
-	})
-	for _, p := range m.LegacyPackages {
-		sort.Strings(p.Imports)
-	}
-	var pkgValues, importValues []interface{}
-	for _, p := range m.LegacyPackages {
-		if p.DocumentationHTML.String() == internal.StringFieldMissing {
-			return errors.New("saveModule: package missing DocumentationHTML")
-		}
-		var licenseTypes, licensePaths []string
-		for _, l := range p.Licenses {
-			if len(l.Types) == 0 {
-				// If a license file has no detected license types, we still need to
-				// record it as applicable to the package, because we want to fail
-				// closed (meaning if there is a LICENSE file containing unknown
-				// licenses, we assume them not to be permissive of redistribution.)
-				licenseTypes = append(licenseTypes, "")
-				licensePaths = append(licensePaths, l.FilePath)
-			} else {
-				for _, typ := range l.Types {
-					licenseTypes = append(licenseTypes, typ)
-					licensePaths = append(licensePaths, l.FilePath)
-				}
-			}
-		}
-		pkgValues = append(pkgValues,
-			p.Path,
-			p.Synopsis,
-			p.Name,
-			m.Version,
-			m.ModulePath,
-			p.V1Path,
-			p.IsRedistributable,
-			makeValidUnicode(p.DocumentationHTML.String()),
-			pq.Array(licenseTypes),
-			pq.Array(licensePaths),
-			p.GOOS,
-			p.GOARCH,
-			m.CommitTime,
-		)
-		for _, i := range p.Imports {
-			importValues = append(importValues, p.Path, m.ModulePath, m.Version, i)
-		}
-	}
-	if len(pkgValues) > 0 {
-		uniqueCols := []string{"path", "module_path", "version"}
-		pkgCols := []string{
-			"path",
-			"synopsis",
-			"name",
-			"version",
-			"module_path",
-			"v1_path",
-			"redistributable",
-			"documentation",
-			"license_types",
-			"license_paths",
-			"goos",
-			"goarch",
-			"commit_time",
-		}
-		if err := db.BulkUpsert(ctx, "packages", pkgCols, pkgValues, uniqueCols); err != nil {
-			return err
-		}
-	}
-
-	if len(importValues) > 0 {
-		importCols := []string{
-			"from_path",
-			"from_module_path",
-			"from_version",
-			"to_path",
-		}
-		if err := db.BulkUpsert(ctx, "imports", importCols, importValues, importCols); err != nil {
-			return err
-		}
+			[]string{"module_id", "file_path"})
 	}
 	return nil
 }
@@ -364,7 +252,11 @@ func insertImportsUnique(ctx context.Context, tx *database.DB, m *internal.Modul
 	return tx.BulkUpsert(ctx, "imports_unique", cols, values, cols)
 }
 
-func insertUnits(ctx context.Context, db *database.DB, m *internal.Module, moduleID int) (err error) {
+// insertUnits inserts the units for a module into the units table.
+//
+// It can be assume that at least one unit is a package, and there are one or
+// more units in the module.
+func (pdb *DB) insertUnits(ctx context.Context, db *database.DB, m *internal.Module, moduleID int) (err error) {
 	defer derrors.Wrap(&err, "insertUnits(ctx, tx, %q, %q)", m.ModulePath, m.Version)
 	ctx, span := trace.StartSpan(ctx, "insertUnits")
 	defer span.End()
@@ -379,17 +271,41 @@ func insertUnits(ctx context.Context, db *database.DB, m *internal.Module, modul
 	for _, u := range m.Units {
 		sort.Strings(u.Imports)
 	}
+
+	var pathValues []interface{}
+	for _, u := range m.Units {
+		pathValues = append(pathValues, u.Path)
+	}
+	// Insert data into the paths table.
+	pathCols := []string{"path"}
+	uniquePathCols := []string{"path"}
+	returningPathCols := []string{"id", "path"}
+
+	pathToID := map[string]int{}
+	if err := db.BulkUpsertReturning(ctx, "paths", pathCols, pathValues, uniquePathCols, returningPathCols, func(rows *sql.Rows) error {
+		var (
+			pathID int
+			path   string
+		)
+		if err := rows.Scan(&pathID, &path); err != nil {
+			return err
+		}
+		pathToID[path] = pathID
+		return nil
+	}); err != nil {
+		return err
+	}
+
 	var (
-		pathValues    []interface{}
-		paths         []string
-		pathToID      = map[string]int{}
+		unitValues    []interface{}
+		pathToUnitID  = map[string]int{}
 		pathToReadme  = map[string]*internal.Readme{}
 		pathToDoc     = map[string]*internal.Documentation{}
 		pathToImports = map[string][]string{}
 	)
-	for _, d := range m.Units {
+	for _, u := range m.Units {
 		var licenseTypes, licensePaths []string
-		for _, l := range d.Licenses {
+		for _, l := range u.Licenses {
 			if len(l.Types) == 0 {
 				// If a license file has no detected license types, we still need to
 				// record it as applicable to the package, because we want to fail
@@ -404,60 +320,61 @@ func insertUnits(ctx context.Context, db *database.DB, m *internal.Module, modul
 				}
 			}
 		}
-		pathValues = append(pathValues,
-			d.Path,
+		unitValues = append(unitValues,
+			u.Path,
+			pathToID[u.Path],
 			moduleID,
-			internal.V1Path(d.Path, m.ModulePath),
-			d.Name,
+			internal.V1Path(u.Path, m.ModulePath),
+			u.Name,
 			pq.Array(licenseTypes),
 			pq.Array(licensePaths),
-			d.IsRedistributable,
+			u.IsRedistributable,
 		)
-		if d.Readme != nil {
-			pathToReadme[d.Path] = d.Readme
+		if u.Readme != nil {
+			pathToReadme[u.Path] = u.Readme
 		}
-		if d.Documentation != nil && d.Documentation.HTML.String() == internal.StringFieldMissing {
+		if u.Documentation != nil && u.Documentation.HTML.String() == internal.StringFieldMissing {
 			return errors.New("insertUnits: package missing Documentation.HTML")
 		}
-		if d.Documentation != nil && experiment.IsActive(ctx, internal.ExperimentInsertPackageSource) {
-			if d.Documentation.Source == nil {
-				return fmt.Errorf("insertUnits: unit %q missing source files", d.Path)
+		if u.Documentation != nil {
+			if u.Documentation.Source == nil {
+				return fmt.Errorf("insertUnits: unit %q missing source files", u.Path)
 			}
 		}
-		pathToDoc[d.Path] = d.Documentation
-		if len(d.Imports) > 0 {
-			pathToImports[d.Path] = d.Imports
+		pathToDoc[u.Path] = u.Documentation
+		if len(u.Imports) > 0 {
+			pathToImports[u.Path] = u.Imports
 		}
 	}
 
-	if len(pathValues) > 0 {
-		pathCols := []string{
-			"path",
-			"module_id",
-			"v1_path",
-			"name",
-			"license_types",
-			"license_paths",
-			"redistributable",
-		}
-		logMemory(ctx, "before inserting into paths")
+	// Insert data into the units table.
+	unitCols := []string{
+		"path",
+		"path_id",
+		"module_id",
+		"v1_path",
+		"name",
+		"license_types",
+		"license_paths",
+		"redistributable",
+	}
+	uniqueUnitCols := []string{"path", "module_id"}
+	returningUnitCols := []string{"id", "path"}
 
-		uniqueCols := []string{"path", "module_id"}
-		returningCols := []string{"id", "path"}
-		if err := db.BulkUpsertReturning(ctx, "paths", pathCols, pathValues, uniqueCols, returningCols, func(rows *sql.Rows) error {
-			var (
-				pathID int
-				path   string
-			)
-			if err := rows.Scan(&pathID, &path); err != nil {
-				return err
-			}
-			pathToID[path] = pathID
-			paths = append(paths, path)
-			return nil
-		}); err != nil {
+	var paths []string
+	if err := db.BulkUpsertReturning(ctx, "units", unitCols, unitValues, uniqueUnitCols, returningUnitCols, func(rows *sql.Rows) error {
+		var (
+			unitID int
+			path   string
+		)
+		if err := rows.Scan(&unitID, &path); err != nil {
 			return err
 		}
+		pathToUnitID[path] = unitID
+		paths = append(paths, path)
+		return nil
+	}); err != nil {
+		return err
 	}
 
 	// Sort to ensure proper lock ordering, avoiding deadlocks. See
@@ -466,7 +383,6 @@ func insertUnits(ctx context.Context, db *database.DB, m *internal.Module, modul
 	// same module, which happens regularly.
 	sort.Strings(paths)
 	if len(pathToReadme) > 0 {
-		logMemory(ctx, "before inserting into readmes")
 		var readmeValues []interface{}
 		for _, path := range paths {
 			readme, ok := pathToReadme[path]
@@ -480,52 +396,44 @@ func insertUnits(ctx context.Context, db *database.DB, m *internal.Module, modul
 				continue
 			}
 
-			id := pathToID[path]
-			readmeValues = append(readmeValues, id, readme.Filepath, readmeContents)
+			unitID := pathToUnitID[path]
+			readmeValues = append(readmeValues, unitID, readme.Filepath, readmeContents)
 		}
-		readmeCols := []string{"path_id", "file_path", "contents"}
-		if err := db.BulkUpsert(ctx, "readmes", readmeCols, readmeValues, []string{"path_id"}); err != nil {
+		readmeCols := []string{"unit_id", "file_path", "contents"}
+		if err := db.BulkUpsert(ctx, "readmes", readmeCols, readmeValues, []string{"unit_id"}); err != nil {
 			return err
 		}
 	}
 
 	if len(pathToDoc) > 0 {
-		logMemory(ctx, "before inserting into documentation")
 		var docValues []interface{}
 		for _, path := range paths {
 			doc := pathToDoc[path]
 			if doc == nil {
 				continue
 			}
-			id := pathToID[path]
-			docValues = append(docValues, id, doc.GOOS, doc.GOARCH, doc.Synopsis, makeValidUnicode(doc.HTML.String()))
-			if experiment.IsActive(ctx, internal.ExperimentInsertPackageSource) {
-				docValues = append(docValues, doc.Source)
-			}
+			unitID := pathToUnitID[path]
+			docValues = append(docValues, unitID, doc.GOOS, doc.GOARCH, doc.Synopsis, makeValidUnicode(doc.HTML.String()), doc.Source)
 		}
-		uniqueCols := []string{"path_id", "goos", "goarch"}
-		docCols := append(uniqueCols, "synopsis", "html")
-		if experiment.IsActive(ctx, internal.ExperimentInsertPackageSource) {
-			docCols = append(docCols, "source")
-		}
+		uniqueCols := []string{"unit_id", "goos", "goarch"}
+		docCols := append(uniqueCols, "synopsis", "html", "source")
 		if err := db.BulkUpsert(ctx, "documentation", docCols, docValues, uniqueCols); err != nil {
 			return err
 		}
 	}
 
-	logMemory(ctx, "before inserting into package_imports")
 	var importValues []interface{}
 	for _, pkgPath := range paths {
 		imports, ok := pathToImports[pkgPath]
 		if !ok {
 			continue
 		}
-		id := pathToID[pkgPath]
+		unitID := pathToUnitID[pkgPath]
 		for _, toPath := range imports {
-			importValues = append(importValues, id, toPath)
+			importValues = append(importValues, unitID, toPath)
 		}
 	}
-	importCols := []string{"path_id", "to_path"}
+	importCols := []string{"unit_id", "to_path"}
 	return db.BulkUpsert(ctx, "package_imports", importCols, importValues, importCols)
 }
 
@@ -547,12 +455,16 @@ func lock(ctx context.Context, tx *database.DB, modulePath string) (err error) {
 	hasher := fnv.New64()
 	io.WriteString(hasher, modulePath) // Writing to a hash.Hash never returns an error.
 	h := int64(hasher.Sum64())
-	log.Debugf(ctx, "locking %s (%d) ...", modulePath, h)
+	if !database.QueryLoggingDisabled {
+		log.Debugf(ctx, "locking %s (%d) ...", modulePath, h)
+	}
 	// See https://www.postgresql.org/docs/11/functions-admin.html#FUNCTIONS-ADVISORY-LOCKS.
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, h); err != nil {
 		return err
 	}
-	log.Debugf(ctx, "locking %s (%d) succeeded", modulePath, h)
+	if !database.QueryLoggingDisabled {
+		log.Debugf(ctx, "locking %s (%d) succeeded", modulePath, h)
+	}
 	return nil
 }
 
@@ -646,36 +558,6 @@ func (db *DB) compareLicenses(ctx context.Context, m *internal.Module) (err erro
 	return nil
 }
 
-// comparePackages compares m.LegacyPackages with the existing packages for
-// m.ModulePath and m.Version in the database. It returns an error if there
-// are packages in the packages table that are not present in m.LegacyPackages.
-func (db *DB) comparePackages(ctx context.Context, m *internal.Module) (err error) {
-	defer derrors.Wrap(&err, "comparePackages(ctx, %q, %q)", m.ModulePath, m.Version)
-	u, err := db.GetUnit(ctx, &internal.UnitMeta{
-		ModulePath:        m.ModulePath,
-		Path:              m.ModulePath,
-		Version:           m.Version,
-		IsRedistributable: m.IsRedistributable,
-		CommitTime:        m.CommitTime,
-	}, internal.WithSubdirectories)
-	if err != nil {
-		if errors.Is(err, derrors.NotFound) {
-			return nil
-		}
-		return err
-	}
-	set := map[string]bool{}
-	for _, p := range m.LegacyPackages {
-		set[p.Path] = true
-	}
-	for _, p := range u.Subdirectories {
-		if _, ok := set[p.Path]; !ok {
-			return fmt.Errorf("expected package %q in module: %w", p.Path, derrors.DBModuleInsertInvalid)
-		}
-	}
-	return nil
-}
-
 // comparePaths compares m.Directories with the existing directories for
 // m.ModulePath and m.Version in the database. It returns an error if there
 // are paths in the paths table that are not present in m.Directories.
@@ -707,8 +589,10 @@ func (db *DB) DeleteModule(ctx context.Context, modulePath, resolvedVersion stri
 		if _, err := tx.Exec(ctx, stmt, modulePath, resolvedVersion); err != nil {
 			return err
 		}
-
 		if _, err = tx.Exec(ctx, `DELETE FROM version_map WHERE module_path = $1 AND resolved_version = $2`, modulePath, resolvedVersion); err != nil {
+			return err
+		}
+		if _, err = tx.Exec(ctx, `DELETE FROM search_documents WHERE module_path = $1 AND version = $2`, modulePath, resolvedVersion); err != nil {
 			return err
 		}
 
@@ -747,18 +631,4 @@ func makeValidUnicode(s string) string {
 		}
 	}
 	return b.String()
-}
-
-var MemoryLoggingDisabled = true
-
-func logMemory(ctx context.Context, msg string) {
-	if !MemoryLoggingDisabled {
-		log.Debugf(ctx, "memory %s: %dM", msg, allocMeg())
-	}
-}
-
-func allocMeg() int {
-	var ms runtime.MemStats
-	runtime.ReadMemStats(&ms)
-	return int(ms.Alloc / (1024 * 1024))
 }

@@ -15,7 +15,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/safehtml"
 	"github.com/google/safehtml/template"
 	"github.com/google/safehtml/testconversions"
 	"golang.org/x/net/html"
@@ -58,9 +57,11 @@ type testModule struct {
 }
 
 type testPackage struct {
-	name   string
-	suffix string
-	doc    string
+	name           string
+	suffix         string
+	doc            string
+	readmeContents string
+	readmeFilePath string
 }
 
 type serverTestCase struct {
@@ -86,8 +87,10 @@ var testModules = []testModule{
 		versions:        []string{"v1.0.0", "v0.9.0", pseudoVersion},
 		packages: []testPackage{
 			{
-				suffix: "foo",
-				doc:    sample.DocumentationHTML.String(),
+				suffix:         "foo",
+				doc:            sample.DocumentationHTML.String(),
+				readmeContents: sample.ReadmeContents,
+				readmeFilePath: sample.ReadmeFilePath,
 			},
 			{
 				suffix: "foo/directory/hello",
@@ -148,37 +151,39 @@ var testModules = []testModule{
 
 func insertTestModules(ctx context.Context, t *testing.T, mods []testModule) {
 	for _, mod := range mods {
-		var ps []*internal.LegacyPackage
+		var (
+			suffixes []string
+			pkgs     = make(map[string]testPackage)
+		)
 		for _, pkg := range mod.packages {
-			p := sample.LegacyPackage(mod.path, pkg.suffix)
-			p.DocumentationHTML = safehtml.HTML{}
-			if pkg.name != "" {
-				p.Name = pkg.name
-			}
-			if pkg.doc != "" {
-				p.DocumentationHTML = testconversions.MakeHTMLForTest(pkg.doc)
-			}
-			if !mod.redistributable {
-				p.Licenses = nil
-				p.IsRedistributable = false
-			}
-			p.V1Path = sample.V1Path
-			ps = append(ps, p)
+			suffixes = append(suffixes, pkg.suffix)
+			pkgs[pkg.suffix] = pkg
 		}
 		for _, ver := range mod.versions {
-			m := sample.LegacyModule(mod.path, ver)
+			m := sample.Module(mod.path, ver, suffixes...)
 			m.SourceInfo = source.NewGitHubInfo(sample.RepositoryURL, "", ver)
 			m.IsRedistributable = mod.redistributable
 			if !m.IsRedistributable {
 				m.Licenses = nil
 			}
-			for _, p := range ps {
-				sample.LegacyAddPackage(m, p)
-			}
 			for _, u := range m.Units {
+				if pkg, ok := pkgs[internal.Suffix(u.Path, m.ModulePath)]; ok {
+					if pkg.name != "" {
+						u.Name = pkg.name
+					}
+					u.Documentation.HTML = testconversions.MakeHTMLForTest(pkg.doc)
+					if pkg.readmeContents != "" {
+						u.Readme = &internal.Readme{
+							Contents: pkg.readmeContents,
+							Filepath: pkg.readmeFilePath,
+						}
+					}
+				}
 				if !mod.redistributable {
 					u.IsRedistributable = false
 					u.Licenses = nil
+					u.Documentation = nil
+					u.Readme = nil
 				}
 			}
 			if err := testDB.InsertModule(ctx, m); err != nil {
@@ -409,7 +414,7 @@ func serverTestCases() []serverTestCase {
 					in("a",
 						href("/"+sample.ModulePath+"@v1.0.0"),
 						text(sample.ModulePath))),
-				in(".Documentation", text(`This is the documentation HTML`))),
+				in(".Documentation", text(`Package p`))),
 		},
 		{
 			name:           "package default redirect",
@@ -430,8 +435,8 @@ func serverTestCases() []serverTestCase {
 			wantStatusCode: http.StatusOK,
 			want: in("",
 				pagecheck.PackageHeader(pkgV100, versioned),
-				in(".Documentation", text(`This is the documentation HTML`)),
-				in(".js-canonicalURLPath", attr("data-canonical-url-path", "/github.com/valid/module_name@v1.0.0/foo"))),
+				in(".Documentation", text(`Package p`)),
+				pagecheck.CanonicalURLPath("/github.com/valid/module_name@v1.0.0/foo")),
 		},
 		{
 			name: "package at version default specific version nonredistributable",
@@ -446,7 +451,7 @@ func serverTestCases() []serverTestCase {
 			wantStatusCode: http.StatusOK,
 			want: in("",
 				pagecheck.PackageHeader(pkgV090, versioned),
-				in(".Documentation", text(`This is the documentation HTML`))),
+				in(".Documentation", text(`Package p`))),
 		},
 		{
 			name: "package at version doc tab nonredistributable",
@@ -614,7 +619,7 @@ func serverTestCases() []serverTestCase {
 					ReadmeContent:  "readme",
 					ReadmeSource:   sample.ModulePath + "@v1.0.0/README.md",
 				}),
-				in(".js-canonicalURLPath", attr("data-canonical-url-path", "/github.com/valid/module_name@v1.0.0/foo"))),
+				pagecheck.CanonicalURLPath("/github.com/valid/module_name@v1.0.0/foo")),
 		},
 		{
 			name:           "directory licenses",
@@ -677,7 +682,7 @@ func serverTestCases() []serverTestCase {
 					RepoURL:        "https://" + sample.ModulePath,
 					ReadmeSource:   sample.ModulePath + "@v1.0.0/README.md",
 				}),
-				in(".js-canonicalURLPath", attr("data-canonical-url-path", "/mod/github.com/valid/module_name@v1.0.0"))),
+				pagecheck.CanonicalURLPath("/mod/github.com/valid/module_name@v1.0.0")),
 		},
 		{
 			name:           "module overview",
@@ -870,6 +875,346 @@ func serverTestCases() []serverTestCase {
 	return testCases
 }
 
+func unitPageTestCases() []serverTestCase {
+	const (
+		versioned   = true
+		unversioned = false
+		isPackage   = true
+		isDirectory = false
+	)
+
+	var (
+		in   = htmlcheck.In
+		text = htmlcheck.HasText
+		attr = htmlcheck.HasAttr
+
+		// href checks for an exact match in an href attribute.
+		href = func(val string) htmlcheck.Checker {
+			return attr("href", "^"+regexp.QuoteMeta(val)+"$")
+		}
+	)
+
+	pkgV100 := &pagecheck.Page{
+		Title:            "foo",
+		ModulePath:       sample.ModulePath,
+		Version:          sample.VersionString,
+		FormattedVersion: sample.VersionString,
+		Suffix:           sample.Suffix,
+		IsLatest:         true,
+		LatestLink:       "/" + sample.ModulePath + "@" + sample.VersionString + "/" + sample.Suffix,
+		LicenseType:      sample.LicenseType,
+		LicenseFilePath:  sample.LicenseFilePath,
+		PackageURLFormat: "/" + sample.ModulePath + "%s/" + sample.Suffix,
+		ModuleURL:        "/" + sample.ModulePath,
+	}
+	p9 := *pkgV100
+	p9.Version = "v0.9.0"
+	p9.FormattedVersion = "v0.9.0"
+	p9.IsLatest = false
+	pkgV090 := &p9
+
+	pp := *pkgV100
+	pp.Version = pseudoVersion
+	pp.FormattedVersion = "v0.0.0-...-1234567"
+	pp.IsLatest = false
+	pkgPseudo := &pp
+
+	pkgInc := &pagecheck.Page{
+		Title:            "inc",
+		ModulePath:       "github.com/incompatible",
+		Version:          "v1.0.0+incompatible",
+		FormattedVersion: "v1.0.0+incompatible",
+		Suffix:           "dir/inc",
+		IsLatest:         true,
+		LatestLink:       "/github.com/incompatible@v1.0.0+incompatible/dir/inc",
+		LicenseType:      "MIT",
+		LicenseFilePath:  "LICENSE",
+		PackageURLFormat: "/github.com/incompatible%s/dir/inc",
+		ModuleURL:        "/github.com/incompatible",
+	}
+
+	pkgNonRedist := &pagecheck.Page{
+		Title:            "bar",
+		ModulePath:       "github.com/non_redistributable",
+		Version:          "v1.0.0",
+		FormattedVersion: "v1.0.0",
+		Suffix:           "bar",
+		IsLatest:         true,
+		LatestLink:       "/github.com/non_redistributable@v1.0.0/bar",
+		LicenseType:      "",
+		PackageURLFormat: "/github.com/non_redistributable%s/bar",
+		ModuleURL:        "/github.com/non_redistributable",
+	}
+
+	dir := &pagecheck.Page{
+		Title:            "directory/",
+		ModulePath:       sample.ModulePath,
+		Version:          "v1.0.0",
+		FormattedVersion: "v1.0.0",
+		Suffix:           "foo/directory",
+		LicenseType:      "MIT",
+		LicenseFilePath:  "LICENSE",
+		ModuleURL:        "/" + sample.ModulePath,
+		PackageURLFormat: "/" + sample.ModulePath + "%s/foo/directory",
+	}
+
+	mod := &pagecheck.Page{
+		ModulePath:       sample.ModulePath,
+		Title:            "module_name",
+		ModuleURL:        "/" + sample.ModulePath,
+		Version:          "v1.0.0",
+		FormattedVersion: "v1.0.0",
+		LicenseType:      "MIT",
+		LicenseFilePath:  "LICENSE",
+		IsLatest:         true,
+		LatestLink:       "/" + sample.ModulePath + "@v1.0.0",
+	}
+	mp := *mod
+	mp.Version = pseudoVersion
+	mp.FormattedVersion = "v0.0.0-...-1234567"
+	mp.IsLatest = false
+
+	dirPseudo := &pagecheck.Page{
+		ModulePath:       "github.com/pseudo",
+		Title:            "dir/",
+		ModuleURL:        "/github.com/pseudo",
+		LatestLink:       "/github.com/pseudo@" + pseudoVersion + "/dir",
+		Suffix:           "dir",
+		Version:          pseudoVersion,
+		FormattedVersion: mp.FormattedVersion,
+		LicenseType:      "MIT",
+		LicenseFilePath:  "LICENSE",
+		IsLatest:         true,
+		PackageURLFormat: "/github.com/pseudo%s/dir",
+	}
+
+	dirCmd := &pagecheck.Page{
+		Title:            "cmd",
+		ModulePath:       "std",
+		Version:          "go1.13",
+		FormattedVersion: "go1.13",
+		Suffix:           "cmd",
+		LicenseType:      "MIT",
+		LicenseFilePath:  "LICENSE",
+		ModuleURL:        "/std",
+		PackageURLFormat: "/cmd%s",
+	}
+
+	netHttp := &pagecheck.Page{
+		Title:            "http",
+		ModulePath:       "http",
+		Version:          "go1.13",
+		FormattedVersion: "go1.13",
+		LicenseType:      sample.LicenseType,
+		LicenseFilePath:  sample.LicenseFilePath,
+		ModuleURL:        "/net/http",
+		PackageURLFormat: "/net/http%s",
+		IsLatest:         true,
+		LatestLink:       "/net/http@go1.13",
+	}
+
+	return []serverTestCase{
+		{
+			name:           "package default",
+			urlPath:        fmt.Sprintf("/%s", sample.PackagePath),
+			wantStatusCode: http.StatusOK,
+			want:           pagecheck.UnitHeader(pkgV100, unversioned, isPackage),
+		},
+		{
+			name:           "package default redirect",
+			urlPath:        fmt.Sprintf("/%s?tab=doc", sample.PackagePath),
+			wantStatusCode: http.StatusFound,
+			wantLocation:   "/" + sample.ModulePath + "/foo",
+		},
+		{
+			name:           "package default nonredistributable",
+			urlPath:        "/github.com/non_redistributable/bar",
+			wantStatusCode: http.StatusOK,
+			want: in("",
+				pagecheck.UnitHeader(pkgNonRedist, unversioned, isPackage),
+				in(".UnitDetails-content", text(`not displayed due to license restrictions`)),
+			),
+		},
+		{
+			name:           "package at version default",
+			urlPath:        fmt.Sprintf("/%s@%s/%s", sample.ModulePath, sample.VersionString, sample.Suffix),
+			wantStatusCode: http.StatusOK,
+			want: in("",
+				pagecheck.UnitHeader(pkgV100, versioned, isPackage),
+				pagecheck.UnitReadme(),
+				pagecheck.UnitDoc(),
+				pagecheck.UnitDirectories(fmt.Sprintf("/%s@%s/%s/directory/hello", sample.ModulePath, sample.VersionString, sample.Suffix), "directory/hello"),
+				pagecheck.CanonicalURLPath("/github.com/valid/module_name@v1.0.0/foo")),
+		},
+		{
+			name:           "package at version default specific version nonredistributable",
+			urlPath:        "/github.com/non_redistributable@v1.0.0/bar",
+			wantStatusCode: http.StatusOK,
+			want: in("",
+				pagecheck.UnitHeader(pkgNonRedist, versioned, isPackage),
+				in(".UnitDetails-content", text(`not displayed due to license restrictions`)),
+			),
+		},
+		{
+			name:           "package at version",
+			urlPath:        fmt.Sprintf("/%s@%s/%s", sample.ModulePath, "v0.9.0", sample.Suffix),
+			wantStatusCode: http.StatusOK,
+			want: in("",
+				pagecheck.UnitHeader(pkgV090, versioned, isPackage),
+				pagecheck.UnitReadme(),
+				pagecheck.UnitDoc(),
+				pagecheck.CanonicalURLPath("/github.com/valid/module_name@v0.9.0/foo")),
+		},
+		{
+			name:           "package at version nonredistributable",
+			urlPath:        "/github.com/non_redistributable@v1.0.0/bar",
+			wantStatusCode: http.StatusOK,
+			want: in("",
+				pagecheck.UnitHeader(pkgNonRedist, versioned, isPackage),
+				in(".UnitDetails-content", text(`not displayed due to license restrictions`))),
+		},
+		{
+			name:           "package at version versions page",
+			urlPath:        fmt.Sprintf("/%s@%s/%s?tab=versions", sample.ModulePath, sample.VersionString, sample.Suffix),
+			wantStatusCode: http.StatusOK,
+			want: in(".Versions",
+				text(`v1`),
+				in("a",
+					href("/"+sample.ModulePath+"@v1.0.0/foo"),
+					text("v1.0.0"))),
+		},
+		{
+			name:           "package at version imports page",
+			urlPath:        fmt.Sprintf("/%s@%s/%s?tab=imports", sample.ModulePath, sample.VersionString, sample.Suffix),
+			wantStatusCode: http.StatusOK,
+			want: in("",
+				in(".Imports-heading", text(`Standard library Imports`)),
+				in(".Imports-list",
+					in("li:nth-child(1) a", href("/fmt"), text("fmt")),
+					in("li:nth-child(2) a", href("/path/to/bar"), text("path/to/bar")))),
+		},
+		{
+			name:           "package at version imported by tab",
+			urlPath:        fmt.Sprintf("/%s@%s/%s?tab=importedby", sample.ModulePath, sample.VersionString, sample.Suffix),
+			wantStatusCode: http.StatusOK,
+			want: in("",
+				in(".EmptyContent-message", text(`No known importers for this package`))),
+		},
+		{
+			name:           "package at version imported by tab second page",
+			urlPath:        fmt.Sprintf("/%s@%s/%s?tab=importedby&page=2", sample.ModulePath, sample.VersionString, sample.Suffix),
+			wantStatusCode: http.StatusOK,
+			want: in("",
+				in(".EmptyContent-message", text(`No known importers for this package`))),
+		},
+		{
+			name:           "package at version licenses tab",
+			urlPath:        fmt.Sprintf("/%s@%s/%s?tab=licenses", sample.ModulePath, sample.VersionString, sample.Suffix),
+			wantStatusCode: http.StatusOK,
+			want: in("",
+				pagecheck.LicenseDetails("MIT", "Lorem Ipsum", sample.ModulePath+"@v1.0.0/LICENSE")),
+		},
+		{
+			name:           "package at version, pseudoversion",
+			urlPath:        fmt.Sprintf("/%s@%s/%s", sample.ModulePath, pseudoVersion, sample.Suffix),
+			wantStatusCode: http.StatusOK,
+			want: in("",
+				pagecheck.UnitHeader(pkgPseudo, versioned, isPackage)),
+		},
+		{
+			name:           "stdlib no shortcut (net/http)",
+			urlPath:        "/net/http",
+			wantStatusCode: http.StatusOK,
+			want:           pagecheck.UnitHeader(netHttp, unversioned, isPackage),
+		},
+		{
+			name:           "stdlib no shortcut (net/http) versioned",
+			urlPath:        "/net/http@go1.13",
+			wantStatusCode: http.StatusOK,
+			want:           pagecheck.UnitHeader(netHttp, versioned, isPackage),
+		},
+		{
+			name:           "package at version, +incompatible",
+			urlPath:        "/github.com/incompatible@v1.0.0+incompatible/dir/inc",
+			wantStatusCode: http.StatusOK,
+			want: in("",
+				pagecheck.UnitHeader(pkgInc, versioned, isPackage)),
+		},
+		{
+			name:           "directory subdirectories",
+			urlPath:        fmt.Sprintf("/%s", sample.PackagePath+"/directory"),
+			wantStatusCode: http.StatusOK,
+			want: in("",
+				pagecheck.UnitHeader(dir, unversioned, isDirectory),
+				// TODO(golang/go#39630) link should be unversioned.
+				pagecheck.UnitDirectories("/"+sample.ModulePath+"@v1.0.0/foo/directory/hello", "hello")),
+		},
+		{
+			name:           "directory@version subdirectories",
+			urlPath:        "/" + sample.ModulePath + "@v1.0.0/foo/directory",
+			wantStatusCode: http.StatusOK,
+			want: in("",
+				pagecheck.UnitHeader(dir, versioned, isDirectory),
+				pagecheck.UnitDirectories("/"+sample.ModulePath+"@v1.0.0/foo/directory/hello", "hello")),
+		},
+		{
+			name:           "directory@version subdirectories pseudoversion",
+			urlPath:        "/github.com/pseudo@" + pseudoVersion + "/dir",
+			wantStatusCode: http.StatusOK,
+			want: in("",
+				pagecheck.UnitHeader(dirPseudo, versioned, isDirectory),
+				pagecheck.UnitDirectories("/github.com/pseudo@"+pseudoVersion+"/dir/baz", "baz")),
+		},
+		{
+			name:           "directory subdirectories pseudoversion",
+			urlPath:        "/github.com/pseudo/dir",
+			wantStatusCode: http.StatusOK,
+			want: in("",
+				pagecheck.UnitHeader(dirPseudo, unversioned, isDirectory),
+				// TODO(golang/go#39630) link should be unversioned.
+				pagecheck.UnitDirectories("/github.com/pseudo@"+pseudoVersion+"/dir/baz", "baz")),
+		},
+		{
+			name:           "directory",
+			urlPath:        fmt.Sprintf("/%s", sample.PackagePath+"/directory"),
+			wantStatusCode: http.StatusOK,
+			want: in("",
+				pagecheck.UnitHeader(dir, unversioned, isDirectory),
+				pagecheck.CanonicalURLPath("/github.com/valid/module_name@v1.0.0/foo")),
+		},
+		{
+			name:           "directory licenses",
+			urlPath:        fmt.Sprintf("/%s?tab=licenses", sample.PackagePath+"/directory"),
+			wantStatusCode: http.StatusOK,
+			want: in("",
+				pagecheck.LicenseDetails("MIT", "Lorem Ipsum", sample.ModulePath+"@v1.0.0/LICENSE")),
+		},
+		{
+			name:           "stdlib directory default",
+			urlPath:        "/cmd",
+			wantStatusCode: http.StatusOK,
+			want: in("",
+				pagecheck.UnitHeader(dirCmd, unversioned, isDirectory),
+				pagecheck.UnitDirectories("", "")),
+		},
+		{
+			name:           "stdlib directory versioned",
+			urlPath:        "/cmd@go1.13",
+			wantStatusCode: http.StatusOK,
+			want: in("",
+				pagecheck.UnitHeader(dirCmd, versioned, isDirectory),
+				pagecheck.UnitDirectories("", "")),
+		},
+		{
+			name:           "stdlib directory licenses",
+			urlPath:        "/cmd@go1.13?tab=licenses",
+			wantStatusCode: http.StatusOK,
+			want: in("",
+				pagecheck.LicenseDetails("MIT", "Lorem Ipsum", "go.googlesource.com/go/+/refs/tags/go1.13/LICENSE")),
+		},
+	}
+}
+
 // TestServer checks the contents of served pages by looking for
 // strings and elements in the parsed HTML response body.
 //
@@ -891,6 +1236,15 @@ func TestServer(t *testing.T) {
 		{
 			name:          "no experiments",
 			testCasesFunc: serverTestCases,
+		},
+		{
+			name: "unit page",
+			experiments: []string{
+				internal.ExperimentUnitPage,
+				internal.ExperimentFrontendRenderDoc,
+				internal.ExperimentGetUnitWithOneQuery,
+			},
+			testCasesFunc: unitPageTestCases,
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -935,8 +1289,6 @@ func testServer(t *testing.T, testCases []serverTestCase, experimentNames ...str
 			}
 			_ = res.Body.Close()
 
-			checkIDs(t, doc)
-
 			if tc.want != nil {
 				if err := tc.want(doc); err != nil {
 					if testing.Verbose() {
@@ -959,25 +1311,12 @@ func isSubset(subset, set *experiment.Set) bool {
 	return true
 }
 
-var badIDRegexp = regexp.MustCompile(`^[a-zA-Z0-9_.]*$`)
-
-func checkIDs(t *testing.T, n *html.Node) {
-	for _, a := range n.Attr {
-		if strings.EqualFold(a.Key, "id") && badIDRegexp.MatchString(a.Val) {
-			t.Errorf("HTML id %q must not be a valid Go identifier or dotted expression (add a hyphen)", a.Val)
-		}
-	}
-	for c := n.FirstChild; c != nil; c = c.NextSibling {
-		checkIDs(t, c)
-	}
-}
-
 func TestServerErrors(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 
 	defer postgres.ResetTestDB(testDB, t)
-	sampleModule := sample.LegacyDefaultModule()
+	sampleModule := sample.DefaultModule()
 	if err := testDB.InsertModule(ctx, sampleModule); err != nil {
 		t.Fatal(err)
 	}

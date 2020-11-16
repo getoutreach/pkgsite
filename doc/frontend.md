@@ -10,31 +10,21 @@ For additional information on functionality of the frontend, see the
 The main program lives in `cmd/frontend`. The bulk of the code lives in
 `internal/frontend`.
 
-### Experiments
-
-Set environment variable `GO_DISCOVERY_CONFIG_DYNAMIC` to the filename of a file
-containing experiments in YAML format. The file can be empty, but it must exist.
-Example:
-
-```
-experiments:
-  - name: sidenav
-    rollout: 100
-    description: Display documentation index on the left sidenav.
-```
+See [experiment.md](experiment.md) for instructions how to enable experiments.
 
 ### Running
 
 You can run the frontend locally like so:
 
-    go run ./cmd/frontend [-dev] [-direct_proxy]
+    go run ./cmd/frontend [-dev] [-direct_proxy] [-local .]
 
 - The `-dev` flag reloads templates on each page load.
 
-The frontend can use one of two datasources:
+The frontend can use one of three datasources:
 
 - Postgres database
-- proxy service
+- Proxy service
+- Local filesystem
 
 The `Datasource` interface implementation is available at internal/datasource.go.
 
@@ -49,6 +39,19 @@ your local database with packages of your choice.
 
 You can then run the frontend with: `go run ./cmd/frontend`
 
+You can also use `-local` flag to run the frontend with an in-memory datasource
+populated with modules loaded from your local filesystem. This allows you to run
+the frontend without setting up a database and to view documentation of local
+modules without requiring a proxy. `-local` accepts a GOPATH-like string containing
+paths of modules to load into memory.
+
 If you add, change or remove any inline scripts in templates, run
 `devtools/cmd/csphash` to update the hashes. Running `all.bash`
 will do that as well.
+
+### Compiling JS sources
+
+The frontend serves compiled and minified JS. If you're modifying any JS code, make
+sure to run `devtools/compile_js.sh` for the changes to take effect. This script will
+require Docker to be installed.
+

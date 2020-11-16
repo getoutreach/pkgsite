@@ -1174,15 +1174,6 @@ pre {
      and "Package Files" is listed in the left side nav.*/
   display: none;
 }
-/**
- * Some versions of the doc template have DocNav also on elements with these
- * classes, which we don’t want to hide unless the sidenav experiment is active.
- * TODO: Remove once HTML has been transitioned to use new markup.
- */
-.Documentation-nav.DocNav,
-.Documentation-toc.DocNav {
-  display: block;
-}
 
 .Documentation {
   color: var(--gray-1);
@@ -1200,6 +1191,7 @@ pre {
 }
 .Documentation h2 a,
 .Documentation h3 a,
+.Documentation h4 a.Documentation-idLink,
 .Documentation summary a {
   opacity: 0;
 }
@@ -1211,6 +1203,7 @@ pre {
 }
 .Documentation h2:hover a,
 .Documentation h3:hover a,
+.Documentation h4:hover a,
 .Documentation summary:hover a,
 .Documentation summary:focus a {
   opacity: 1;
@@ -1274,6 +1267,11 @@ pre {
 .Documentation-typeMethodHeader,
 .Documentation-typeFuncHeader {
   margin-bottom: 0.5rem;
+}
+
+.Documentation-constants br:last-of-type,
+.Documentation-variables br:last-of-type {
+  display: none;
 }
 
 .Documentation-build {
@@ -1365,6 +1363,10 @@ pre {
   color: var(--gray-3);
   font-weight: 400;
   font-size: 1rem;
+}
+.Versions-message {
+  color: var(--gray-3);
+  margin-bottom: 2rem;
 }
 .Versions-modulePath {
   color: var(--gray-3);

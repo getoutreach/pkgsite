@@ -309,17 +309,7 @@ func parseDetailsURLPath(urlPath string) (fullPath, modulePath, requestedVersion
 // acceptable. The given path may be a module or package path.
 func validatePathAndVersion(ctx context.Context, ds internal.DataSource, fullPath, requestedVersion string) error {
 	if !isSupportedVersion(fullPath, requestedVersion) {
-		return &serverError{
-			status: http.StatusBadRequest,
-			epage: &errorPage{
-				messageTemplate: template.MakeTrustedTemplate(`
-					<h3 class="Error-message">{{.Version}} is not a valid semantic version.</h3>
-					<p class="Error-message">
-					  To search for packages like {{.Path}}, <a href="/search?q={{.Path}}">click here</a>.
-					</p>`),
-				MessageData: struct{ Path, Version string }{fullPath, requestedVersion},
-			},
-		}
+		return invalidVersionError(fullPath, requestedVersion)
 	}
 	db, ok := ds.(*postgres.DB)
 	if !ok {
@@ -350,6 +340,9 @@ func isSupportedVersion(fullPath, requestedVersion string) bool {
 // pathNotFoundError returns a page with an option on how to
 // add a package or module to the site.
 func pathNotFoundError(fullPath, requestedVersion string) error {
+	if !isSupportedVersion(fullPath, requestedVersion) {
+		return invalidVersionError(fullPath, requestedVersion)
+	}
 	if stdlib.Contains(fullPath) {
 		return &serverError{status: http.StatusNotFound}
 	}
@@ -362,6 +355,20 @@ func pathNotFoundError(fullPath, requestedVersion string) error {
 		epage: &errorPage{
 			templateName: "fetch.tmpl",
 			MessageData:  path,
+		},
+	}
+}
+
+func invalidVersionError(fullPath, requestedVersion string) error {
+	return &serverError{
+		status: http.StatusBadRequest,
+		epage: &errorPage{
+			messageTemplate: template.MakeTrustedTemplate(`
+					<h3 class="Error-message">{{.Version}} is not a valid semantic version.</h3>
+					<p class="Error-message">
+					  To search for packages like {{.Path}}, <a href="/search?q={{.Path}}">click here</a>.
+					</p>`),
+			MessageData: struct{ Path, Version string }{fullPath, requestedVersion},
 		},
 	}
 }
@@ -397,6 +404,20 @@ func parseStdLibURLPath(urlPath string) (path, requestedVersion string, err erro
 	return path, requestedVersion, nil
 }
 
+// errUnitNotFoundWithoutFetch returns a 404 with instructions to the user on
+// how to manually fetch the package. No fetch button is provided. This is used
+// for very large modules or modules that previously 500ed.
+var errUnitNotFoundWithoutFetch = &serverError{
+	status: http.StatusNotFound,
+	epage: &errorPage{
+		messageTemplate: template.MakeTrustedTemplate(`
+					    <h3 class="Error-message">{{.StatusText}}</h3>
+					    <p class="Error-message">Check that you entered the URL correctly or try fetching it following the
+                        <a href="/about#adding-a-package">instructions here</a>.</p>`),
+		MessageData: struct{ StatusText string }{http.StatusText(http.StatusNotFound)},
+	},
+}
+
 func (s *Server) servePathNotFoundPage(w http.ResponseWriter, r *http.Request, ds internal.DataSource, fullPath, requestedVersion string) (err error) {
 	defer derrors.Wrap(&err, "servePathNotFoundPage(w, r, %q, %q)", fullPath, requestedVersion)
 
@@ -424,7 +445,10 @@ func (s *Server) servePathNotFoundPage(w http.ResponseWriter, r *http.Request, d
 	}
 	results := s.checkPossibleModulePaths(ctx, db, fullPath, requestedVersion, modulePaths, false)
 	for _, fr := range results {
-		if fr.status == statusNotFoundInVersionMap || fr.status == http.StatusInternalServerError {
+		if fr.status == http.StatusInternalServerError {
+			return errUnitNotFoundWithoutFetch
+		}
+		if fr.status == statusNotFoundInVersionMap {
 			// If the result is statusNotFoundInVersionMap, it means that
 			// we haven't attempted to fetch this path before. Return an
 			// error page giving the user the option to fetch the path.

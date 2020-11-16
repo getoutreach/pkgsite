@@ -41,7 +41,7 @@ var (
 	_              = flag.String("static", "content/static", "path to folder containing static files served")
 	thirdPartyPath = flag.String("third_party", "third_party", "path to folder containing third-party libraries")
 	devMode        = flag.Bool("dev", false, "enable developer mode (reload templates on each page load, serve non-minified JS/CSS, etc.)")
-	disableCSP     = flag.Bool("nocsp", false, "enable Content Security Policy")
+	disableCSP     = flag.Bool("nocsp", false, "disable Content Security Policy")
 	proxyURL       = flag.String("proxy_url", "https://proxy.golang.org", "Uses the module proxy referred to by this URL "+
 		"for direct proxy mode and frontend fetches")
 	directProxy = flag.Bool("direct_proxy", false, "if set to true, uses the module proxy referred to by this URL "+
@@ -75,25 +75,12 @@ func main() {
 		log.Info(ctx, "BYPASSING LICENSE CHECKING: DISPLAYING NON-REDISTRIBUTABLE INFORMATION")
 	}
 
+	log.Infof(ctx, "cmd/frontend: initializing cmdconfig.ExperimentGetter")
 	expg := cmdconfig.ExperimentGetter(ctx, cfg)
+	log.Infof(ctx, "cmd/frontend: initialized cmdconfig.ExperimentGetter")
+
 	if *localPaths != "" {
 		lds := localdatasource.New()
-		paths := filepath.SplitList(*localPaths)
-		if *gopathMode {
-			for _, path := range paths {
-				err := lds.LoadFromGOPATH(ctx, path)
-				if err != nil {
-					log.Error(ctx, err)
-				}
-			}
-		} else {
-			for _, path := range paths {
-				err := lds.Load(ctx, path)
-				if err != nil {
-					log.Error(ctx, err)
-				}
-			}
-		}
 		dsg = func(context.Context) internal.DataSource { return lds }
 	} else {
 		proxyClient, err := proxy.New(*proxyURL)
@@ -115,10 +102,14 @@ func main() {
 			if err != nil {
 				log.Fatalf(ctx, "unable to register the ocsql driver: %v\n", err)
 			}
+
+			log.Infof(ctx, "cmd/frontend: openDB start")
 			ddb, err := openDB(ctx, cfg, ocDriver)
 			if err != nil {
 				log.Fatal(ctx, err)
 			}
+			log.Infof(ctx, "cmd/frontend: openDB finished")
+
 			var db *postgres.DB
 			if *bypassLicenseCheck {
 				db = postgres.NewBypassingLicenseCheck(ddb)
@@ -162,6 +153,14 @@ func main() {
 	if err != nil {
 		log.Fatalf(ctx, "frontend.NewServer: %v", err)
 	}
+
+	if *localPaths != "" {
+		lds, ok := dsg(ctx).(*localdatasource.DataSource)
+		if ok {
+			load(ctx, lds, *localPaths)
+		}
+	}
+
 	router := dcensus.NewRouter(frontend.TagRoute)
 	var cacheClient *redis.Client
 	if cfg.RedisCacheHost != "" {
@@ -199,7 +198,10 @@ func main() {
 		log.Fatal(ctx, err)
 	}
 	rc := cmdconfig.ReportingClient(ctx, cfg)
+	log.Infof(ctx, "cmd/frontend: initializing cmdconfig.Experimenter")
 	experimenter := cmdconfig.Experimenter(ctx, cfg, expg, rc)
+	log.Infof(ctx, "cmd/frontend: initialized cmdconfig.Experimenter")
+
 	ermw := middleware.Identity()
 	if rc != nil {
 		ermw = middleware.ErrorReporting(rc.Report)
@@ -233,8 +235,10 @@ func openDB(ctx context.Context, cfg *config.Config, driver string) (_ *database
 	log.Infof(ctx, "opening database on host %s", cfg.DBHost)
 	ddb, err := database.Open(driver, cfg.DBConnInfo(), cfg.InstanceID)
 	if err == nil {
+		log.Infof(ctx, "connected to primary host: %s", cfg.DBHost)
 		return ddb, nil
 	}
+
 	ci := cfg.DBSecondaryConnInfo()
 	if ci == "" {
 		log.Infof(ctx, "no secondary DB host")
@@ -242,5 +246,32 @@ func openDB(ctx context.Context, cfg *config.Config, driver string) (_ *database
 	}
 	log.Errorf(ctx, "database.Open for primary host %s failed with %v; trying secondary host %s ",
 		cfg.DBHost, err, cfg.DBSecondaryHost)
-	return database.Open(driver, ci, cfg.InstanceID)
+	db, err := database.Open(driver, ci, cfg.InstanceID)
+	if err != nil {
+		return nil, err
+	}
+	log.Infof(ctx, "connected to secondary host %s", cfg.DBSecondaryHost)
+	return db, nil
+}
+
+// load loads local modules from pathList.
+func load(ctx context.Context, ds *localdatasource.DataSource, pathList string) {
+	paths := filepath.SplitList(pathList)
+	loaded := len(paths)
+	for _, path := range paths {
+		var err error
+		if *gopathMode {
+			err = ds.LoadFromGOPATH(ctx, path)
+		} else {
+			err = ds.Load(ctx, path)
+		}
+		if err != nil {
+			log.Error(ctx, err)
+			loaded--
+		}
+	}
+
+	if loaded == 0 {
+		log.Fatalf(ctx, "failed to load module(s) at %s", pathList)
+	}
 }

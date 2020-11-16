@@ -29,6 +29,7 @@ import (
 	"golang.org/x/pkgsite/internal"
 	"golang.org/x/pkgsite/internal/config"
 	"golang.org/x/pkgsite/internal/derrors"
+	"golang.org/x/pkgsite/internal/godoc/dochtml"
 	"golang.org/x/pkgsite/internal/index"
 	"golang.org/x/pkgsite/internal/log"
 	"golang.org/x/pkgsite/internal/middleware"
@@ -87,11 +88,11 @@ func NewServer(cfg *config.Config, scfg ServerConfig) (_ *Server, err error) {
 	if err != nil {
 		return nil, err
 	}
+	dochtml.LoadTemplates(template.TrustedSourceJoin(scfg.StaticPath, template.TrustedSourceFromConstant("html/doc")))
 	templates := map[string]*template.Template{
 		indexTemplate:    t1,
 		versionsTemplate: t2,
 	}
-
 	return &Server{
 		cfg:                  cfg,
 		db:                   scfg.DB,
@@ -117,6 +118,18 @@ func (s *Server) Install(handle func(string, http.Handler)) {
 	if s.reportingClient != nil {
 		rmw = middleware.ErrorReporting(s.reportingClient.Report)
 	}
+
+	// Each AppEngine instance is created in response to a start request, which
+	// is an empty HTTP GET request to /_ah/start when scaling is set to manual
+	// or basic, and /_ah/warmup when scaling is automatic and min_instances is
+	// set. AppEngine sends this request to bring an instance into existence.
+	// See details for /_ah/start at
+	// https://cloud.google.com/appengine/docs/standard/go/how-instances-are-managed#startup
+	// and for /_ah/warmup at
+	// https://cloud.google.com/appengine/docs/standard/go/configuring-warmup-requests.
+	handle("/_ah/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		log.Infof(r.Context(), "Request made to %q", r.URL.Path)
+	}))
 
 	// scheduled: poll polls the Module Index for new modules
 	// that have been published and inserts that metadata into
@@ -199,6 +212,10 @@ func (s *Server) Install(handle func(string, http.Handler)) {
 	// Health check.
 	handle("/healthz", http.HandlerFunc(s.handleHealthCheck))
 
+	handle("/favicon.ico", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.ServeFile(w, r, "content/static/img/worker-favicon.ico")
+	}))
+
 	// returns an HTML page displaying the homepage.
 	handle("/", http.HandlerFunc(s.handleHTMLPage(s.doIndexPage)))
 }
@@ -237,7 +254,7 @@ func (s *Server) handleRepopulateSearchDocuments(w http.ResponseWriter, r *http.
 	}
 
 	for _, args := range sdargs {
-		if err := postgres.UpsertSearchDocument(ctx, s.db.Underlying(), args); err != nil {
+		if err := s.db.UpsertSearchDocument(ctx, s.db.Underlying(), args); err != nil {
 			return err
 		}
 	}
@@ -254,10 +271,6 @@ func (s *Server) handleFetch(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, `<p><a href="/fetch/rsc.io/quote/@v/v1.0.0">Fetch an example module</a></p>`)
 		return
 	}
-	if r.URL.Path == "/favicon.ico" {
-		return
-	}
-
 	msg, code := s.doFetch(r)
 	if code == http.StatusInternalServerError || code == http.StatusServiceUnavailable {
 		log.Infof(r.Context(), "doFetch of %s returned %d; returning that code to retry task", r.URL.Path, code)

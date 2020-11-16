@@ -14,7 +14,6 @@ import (
 	"sync"
 	"time"
 
-	"go.opencensus.io/plugin/ochttp"
 	"go.opencensus.io/stats"
 	"go.opencensus.io/stats/view"
 	"go.opencensus.io/tag"
@@ -49,12 +48,22 @@ var (
 		"Latency of a frontend fetch request.",
 		stats.UnitMilliseconds,
 	)
+
 	// FetchLatencyDistribution aggregates frontend fetch request
 	// latency by status code.
 	FetchLatencyDistribution = &view.View{
-		Name:        "go-discovery/frontend-fetch/latency",
-		Measure:     frontendFetchLatency,
-		Aggregation: ochttp.DefaultLatencyDistribution,
+		Name:    "go-discovery/frontend-fetch/latency",
+		Measure: frontendFetchLatency,
+		// Modified from ochttp.DefaultLatencyDistribution to remove high
+		// values. Because our unit is seconds rather than milliseconds, the
+		// high values are too large (100000 = 27 hours). The main consequence
+		// is that the Fetch Latency heatmap on the dashboard is less
+		// informative.
+		Aggregation: view.Distribution(
+			1, 2, 3, 4, 5, 6, 8, 10, 13, 16, 20, 25, 30, 40, 50, 65, 80, 100,
+			130, 160, 200, 250, 300, 400, 500, 650, 800, 1000,
+			30*60, // half hour: the max time an HTTP task can run
+			60*60),
 		Description: "FrontendFetch latency, by result source query type.",
 		TagKeys:     []tag.Key{keyFetchStatus},
 	}
@@ -138,6 +147,7 @@ func (s *Server) fetchAndPoll(ctx context.Context, ds internal.DataSource, modul
 		if errors.As(err, &serr) {
 			return serr.status, http.StatusText(serr.status)
 		}
+		log.Errorf(ctx, "fetchAndPoll(ctx, ds, q, %q, %q, %q): %v", modulePath, fullPath, requestedVersion, err)
 		return http.StatusInternalServerError, http.StatusText(http.StatusInternalServerError)
 	}
 	results := s.checkPossibleModulePaths(ctx, db, fullPath, requestedVersion, modulePaths, true)
@@ -169,16 +179,20 @@ func (s *Server) checkPossibleModulePaths(ctx context.Context, db *postgres.DB,
 			// have already attempted to fetch it in the past. If so, just
 			// return the result from that fetch process.
 			fr := checkForPath(ctx, db, fullPath, modulePath, requestedVersion, s.taskIDChangeInterval)
+			log.Debugf(ctx, "initial checkForPath(ctx, db, %q, %q, %q, %d): status=%d, err=%v", fullPath, modulePath, requestedVersion, s.taskIDChangeInterval, fr.status, fr.err)
 			if !shouldQueue || fr.status != statusNotFoundInVersionMap {
 				results[i] = fr
 				return
 			}
+
 			// A row for this modulePath and requestedVersion combination does not
 			// exist in version_map. Enqueue the module version to be fetched.
 			if _, err := s.queue.ScheduleFetch(ctx, modulePath, requestedVersion, "", s.taskIDChangeInterval); err != nil {
 				fr.err = err
 				fr.status = http.StatusInternalServerError
 			}
+			log.Debugf(ctx, "queued %s@%s to frontend-fetch task queue", modulePath, requestedVersion)
+
 			// After the fetch request is enqueued, poll the database until it has been
 			// inserted or the request times out.
 			fr = pollForPath(ctx, db, pollEvery, fullPath, modulePath, requestedVersion, s.taskIDChangeInterval)
@@ -335,10 +349,13 @@ func checkForPath(ctx context.Context, db *postgres.DB,
 		status:     vm.Status,
 		goModPath:  vm.GoModPath,
 	}
+
 	switch fr.status {
+	case http.StatusInternalServerError:
+		fr.err = fmt.Errorf("%q: %v", http.StatusText(fr.status), vm.Error)
+		return fr
 	case http.StatusNotFound,
-		derrors.ToStatus(derrors.DBModuleInsertInvalid),
-		http.StatusInternalServerError:
+		derrors.ToStatus(derrors.DBModuleInsertInvalid):
 		if time.Since(vm.UpdatedAt) > taskIDChangeInterval {
 			// If the duration of taskIDChangeInterval has passed since
 			// a module_path was last inserted into version_map with a failed status,

@@ -7,6 +7,7 @@ package frontend
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
@@ -43,6 +44,7 @@ func TestFetchSearchPage(t *testing.T) {
 					},
 					Documentation: &internal.Documentation{
 						Synopsis: "foo is a package.",
+						Source:   []byte{},
 					},
 					Readme: &internal.Readme{
 						Filepath: "readme",
@@ -71,6 +73,7 @@ func TestFetchSearchPage(t *testing.T) {
 					},
 					Documentation: &internal.Documentation{
 						Synopsis: "bar is used by foo.",
+						Source:   []byte{},
 					},
 					Readme: &internal.Readme{
 						Filepath: "readme",
@@ -80,20 +83,7 @@ func TestFetchSearchPage(t *testing.T) {
 			},
 		}
 	)
-
 	for _, m := range []*internal.Module{moduleFoo, moduleBar} {
-		// TODO(golang/go#39629): Delete once packages table is fully deprecated.
-		for _, pkg := range m.Packages() {
-			m.LegacyPackages = append(m.LegacyPackages, &internal.LegacyPackage{
-				Path:              pkg.Path,
-				Name:              pkg.Name,
-				Synopsis:          pkg.Documentation.Synopsis,
-				Licenses:          sample.LicenseMetadata,
-				IsRedistributable: pkg.IsRedistributable,
-				GOOS:              pkg.Documentation.GOOS,
-				GOARCH:            pkg.Documentation.GOARCH,
-			})
-		}
 		if err := testDB.InsertModule(ctx, m); err != nil {
 			t.Fatal(err)
 		}
@@ -208,8 +198,8 @@ func TestSearchRequestRedirectPath(t *testing.T) {
 	defer cancel()
 	defer postgres.ResetTestDB(testDB, t)
 
-	golangTools := sample.LegacyModule("golang.org/x/tools", sample.VersionString, "internal/lsp")
-	std := sample.LegacyModule("std", sample.VersionString,
+	golangTools := sample.Module("golang.org/x/tools", sample.VersionString, "internal/lsp")
+	std := sample.Module("std", sample.VersionString,
 		"cmd/go", "cmd/go/internal/auth", "fmt")
 	modules := []*internal.Module{golangTools, std}
 
@@ -236,6 +226,56 @@ func TestSearchRequestRedirectPath(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := searchRequestRedirectPath(ctx, testDB, tc.query); got != tc.want {
 				t.Errorf("searchRequestRedirectPath(ctx, %q) = %q; want = %q", tc.query, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestElapsedTime(t *testing.T) {
+	now := sample.NowTruncated()
+	testCases := []struct {
+		name        string
+		date        time.Time
+		elapsedTime string
+	}{
+		{
+			name:        "one_hour_ago",
+			date:        now.Add(time.Hour * -1),
+			elapsedTime: "1 hour ago",
+		},
+		{
+			name:        "hours_ago",
+			date:        now.Add(time.Hour * -2),
+			elapsedTime: "2 hours ago",
+		},
+		{
+			name:        "today",
+			date:        now.Add(time.Hour * -8),
+			elapsedTime: "today",
+		},
+		{
+			name:        "one_day_ago",
+			date:        now.Add(time.Hour * 24 * -1),
+			elapsedTime: "1 day ago",
+		},
+		{
+			name:        "days_ago",
+			date:        now.Add(time.Hour * 24 * -5),
+			elapsedTime: "5 days ago",
+		},
+		{
+			name:        "more_than_6_days_ago",
+			date:        now.Add(time.Hour * 24 * -14),
+			elapsedTime: now.Add(time.Hour * 24 * -14).Format("Jan _2, 2006"),
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			elapsedTime := elapsedTime(tc.date)
+
+			if elapsedTime != tc.elapsedTime {
+				t.Errorf("elapsedTime(%q) = %s, want %s", tc.date, elapsedTime, tc.elapsedTime)
 			}
 		})
 	}

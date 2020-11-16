@@ -7,6 +7,7 @@ package dochtml
 import (
 	"context"
 	"reflect"
+	"sync"
 
 	"github.com/google/safehtml/template"
 	"golang.org/x/pkgsite/internal"
@@ -15,23 +16,44 @@ import (
 	"golang.org/x/pkgsite/internal/godoc/internal/doc"
 )
 
-// htmlPackage is the template used to render documentation HTML.
+var (
+	loadOnce                     sync.Once
+	unitTemplate, legacyTemplate *template.Template
+)
+
+// LoadTemplates reads and parses the templates used to generate documentation.
+func LoadTemplates(dir template.TrustedSource) {
+	loadOnce.Do(func() {
+		join := template.TrustedSourceJoin
+		tc := template.TrustedSourceFromConstant
+
+		example := join(dir, tc("example.tmpl"))
+		legacyTemplate = template.Must(template.New("legacy.tmpl").
+			Funcs(tmpl).
+			ParseFilesFromTrustedSources(join(dir, tc("legacy.tmpl")), example))
+		unitTemplate = template.Must(template.New("unit.tmpl").
+			Funcs(tmpl).
+			ParseFilesFromTrustedSources(
+				join(dir, tc("unit.tmpl")),
+				join(dir, tc("sidenav.tmpl")),
+				join(dir, tc("sidenav-mobile.tmpl")),
+				join(dir, tc("body.tmpl")),
+				example))
+	})
+}
+
+// htmlPackage returns the template used to render documentation HTML.
 // TODO(golang.org/issue/5060): finalize URL scheme and design for notes,
 // then it becomes more viable to factor out inline CSS style.
 func htmlPackage(ctx context.Context) *template.Template {
-	t := template.New("package").Funcs(tmpl)
-	if experiment.IsActive(ctx, internal.ExperimentUnitPage) {
-		return template.Must(t.Parse(tmplHTML))
+	if unitTemplate == nil || legacyTemplate == nil {
+		panic("dochtml.LoadTemplates never called")
 	}
-	return template.Must(t.Parse(legacyTmplHTML))
+	if experiment.IsActive(ctx, internal.ExperimentUnitPage) {
+		return unitTemplate
+	}
+	return legacyTemplate
 }
-
-const (
-	tmplHTML = `{{- "" -}}` + tmplSidenav + tmplBody + tmplExample
-
-	// legacyTmplHTML should not be edited.
-	legacyTmplHTML = `{{- "" -}}` + legacyTmplSidenav + legacyTmplBody + tmplExample
-)
 
 var tmpl = map[string]interface{}{
 	"ternary": func(q, a, b interface{}) interface{} {

@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"path"
+	"sort"
 	"strings"
 	"time"
 
@@ -84,6 +85,24 @@ func renderDoc(ctx context.Context, u *internal.Unit, docPkg *godoc.Package) (_ 
 	}, nil
 }
 
+func renderDocParts(ctx context.Context, u *internal.Unit, docPkg *godoc.Package) (body, outline, mobileOutline safehtml.HTML, err error) {
+	defer derrors.Wrap(&err, "renderDocParts")
+	defer middleware.ElapsedStat(ctx, "renderDocParts")()
+
+	modInfo := &godoc.ModuleInfo{
+		ModulePath:      u.ModulePath,
+		ResolvedVersion: u.Version,
+		ModulePackages:  nil, // will be provided by docPkg
+	}
+	var innerPath string
+	if u.ModulePath == stdlib.ModulePath {
+		innerPath = u.Path
+	} else if u.Path != u.ModulePath {
+		innerPath = u.Path[len(u.ModulePath)+1:]
+	}
+	return docPkg.RenderParts(ctx, innerPath, u.SourceInfo, modInfo)
+}
+
 // sourceFiles returns the .go files for a package.
 func sourceFiles(u *internal.Unit, docPkg *godoc.Package) []*File {
 	var files []*File
@@ -96,6 +115,7 @@ func sourceFiles(u *internal.Unit, docPkg *godoc.Package) []*File {
 			URL:  u.SourceInfo.FileURL(path.Join(internal.Suffix(u.Path, u.ModulePath), f.Name)),
 		})
 	}
+	sort.Slice(files, func(i, j int) bool { return files[i].Name < files[j].Name })
 	return files
 }
 

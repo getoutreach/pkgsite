@@ -332,22 +332,28 @@ func (db *DB) addPackageDataToSearchResults(ctx context.Context, results []*inte
 	}
 	query := fmt.Sprintf(`
 		SELECT
-			path,
-			name,
-			synopsis,
-			license_types,
-			redistributable
+			p.path,
+			p.name,
+			d.synopsis,
+			p.license_types,
+			p.redistributable
 		FROM
-			packages
+			units p
+		INNER JOIN
+		    modules m
+		ON p.module_id = m.id
+		LEFT JOIN
+		    documentation d
+		ON p.id = d.unit_id
 		WHERE
-			(path, version, module_path) IN (%s)`, strings.Join(keys, ","))
+			(p.path, m.version, m.module_path) IN (%s)`, strings.Join(keys, ","))
 	collect := func(rows *sql.Rows) error {
 		var (
 			path, name, synopsis string
 			licenseTypes         []string
 			redist               bool
 		)
-		if err := rows.Scan(&path, &name, &synopsis, pq.Array(&licenseTypes), &redist); err != nil {
+		if err := rows.Scan(&path, &name, database.NullIsEmpty(&synopsis), pq.Array(&licenseTypes), &redist); err != nil {
 			return fmt.Errorf("rows.Scan(): %v", err)
 		}
 		r, ok := resultMap[path]
@@ -386,10 +392,10 @@ var upsertSearchStatement = fmt.Sprintf(`
 	)
 	SELECT
 		p.path,
-		p.version,
-		p.module_path,
+		m.version,
+		m.module_path,
 		p.name,
-		p.synopsis,
+		d.synopsis,
 		p.license_types,
 		p.redistributable,
 		CURRENT_TIMESTAMP,
@@ -404,13 +410,15 @@ var upsertSearchStatement = fmt.Sprintf(`
 		hll_hash(p.path) & (%[1]d - 1),
 		hll_zeros(hll_hash(p.path))
 	FROM
-		packages p
+		units p
 	INNER JOIN
 		modules m
-
 	ON
-		p.module_path = m.module_path
-		AND p.version = m.version
+		p.module_id = m.id
+	LEFT JOIN
+		documentation d
+	ON
+		p.id = d.unit_id
 	WHERE
 		p.path = $1
 	%s
@@ -437,8 +445,8 @@ var upsertSearchStatement = fmt.Sprintf(`
 
 // upsertSearchDocuments adds search information for mod ot the search_documents table.
 // It assumes that all non-redistributable data has been removed from mod.
-func upsertSearchDocuments(ctx context.Context, db *database.DB, mod *internal.Module) (err error) {
-	defer derrors.Wrap(&err, "UpsertSearchDocuments(ctx, %q)", mod.ModulePath)
+func (db *DB) upsertSearchDocuments(ctx context.Context, ddb *database.DB, mod *internal.Module) (err error) {
+	defer derrors.Wrap(&err, "upsertSearchDocuments(ctx, %q)", mod.ModulePath)
 	ctx, span := trace.StartSpan(ctx, "UpsertSearchDocuments")
 	defer span.End()
 	for _, pkg := range mod.Packages() {
@@ -456,7 +464,7 @@ func upsertSearchDocuments(ctx context.Context, db *database.DB, mod *internal.M
 			args.ReadmeFilePath = pkg.Readme.Filepath
 			args.ReadmeContents = pkg.Readme.Contents
 		}
-		if err := UpsertSearchDocument(ctx, db, args); err != nil {
+		if err := db.UpsertSearchDocument(ctx, ddb, args); err != nil {
 			return err
 		}
 	}
@@ -476,8 +484,8 @@ type upsertSearchDocumentArgs struct {
 //
 // The given module should have already been validated via a call to
 // validateModule.
-func UpsertSearchDocument(ctx context.Context, db *database.DB, args upsertSearchDocumentArgs) (err error) {
-	defer derrors.Wrap(&err, "UpsertSearchDocument(ctx, db, %q, %q)", args.PackagePath, args.ModulePath)
+func (db *DB) UpsertSearchDocument(ctx context.Context, ddb *database.DB, args upsertSearchDocumentArgs) (err error) {
+	defer derrors.Wrap(&err, "DB.UpsertSearchDocument(ctx, ddb, %q, %q)", args.PackagePath, args.ModulePath)
 
 	// Only summarize the README if the package and module have the same path.
 	if args.PackagePath != args.ModulePath {
@@ -486,7 +494,7 @@ func UpsertSearchDocument(ctx context.Context, db *database.DB, args upsertSearc
 	}
 	pathTokens := strings.Join(GeneratePathTokens(args.PackagePath), " ")
 	sectionB, sectionC, sectionD := SearchDocumentSections(args.Synopsis, args.ReadmeFilePath, args.ReadmeContents)
-	_, err = db.Exec(ctx, upsertSearchStatement, args.PackagePath, pathTokens, sectionB, sectionC, sectionD)
+	_, err = ddb.Exec(ctx, upsertSearchStatement, args.PackagePath, pathTokens, sectionB, sectionC, sectionD)
 	return err
 }
 
@@ -504,10 +512,10 @@ func (db *DB) GetPackagesForSearchDocumentUpsert(ctx context.Context, before tim
 			r.file_path,
 			r.contents
 		FROM modules m
-		INNER JOIN paths p
+		INNER JOIN units p
 		ON m.id = p.module_id
 		LEFT JOIN readmes r
-		ON p.id = r.path_id
+		ON p.id = r.unit_id
 		INNER JOIN search_documents sd
 		ON sd.package_path = p.path
 		    AND sd.module_path = m.module_path
@@ -706,7 +714,15 @@ func compareImportedByCounts(ctx context.Context, db *database.DB) (err error) {
 // Note that if a package is never imported, its imported_by_count column will
 // be the default (0) and its imported_by_count_updated_at column will never be set.
 func updateImportedByCounts(ctx context.Context, db *database.DB) (int64, error) {
+	// Lock the entire table to avoid deadlock. Without the lock, the update can
+	// fail because module inserts are concurrently modifying rows of
+	// search_documents.
+	// See https://www.postgresql.org/docs/11/explicit-locking.html for what locks mean.
+	// See https://www.postgresql.org/docs/11/sql-lock.html for the LOCK
+	// statement, notably the paragraph beginning "If a transaction of this sort
+	// is going to change the data...".
 	const updateStmt = `
+		LOCK TABLE search_documents IN SHARE ROW EXCLUSIVE MODE;
 		UPDATE search_documents s
 		SET
 			imported_by_count = c.imported_by_count,

@@ -19,9 +19,10 @@ if (accordion) {
  * Event handlers for expanding and collapsing the readme section.
  */
 const readme = document.querySelector('.js-readme');
+const readmeContent = document.querySelector('.js-readmeContent');
 const readmeExpand = document.querySelectorAll('.js-readmeExpand');
 const readmeCollapse = document.querySelector('.js-readmeCollapse');
-if (readmeExpand && readmeExpand && readmeCollapse) {
+if (readme && readmeContent && readmeExpand.length && readmeCollapse) {
   readmeExpand.forEach(el =>
     el.addEventListener('click', e => {
       e.preventDefault();
@@ -32,6 +33,29 @@ if (readmeExpand && readmeExpand && readmeCollapse) {
   readmeCollapse.addEventListener('click', e => {
     e.preventDefault();
     readme.classList.remove('UnitReadme--expanded');
-    readme.scrollIntoView();
+    readmeExpand[1].scrollIntoView({ block: 'center' });
   });
+  readmeContent.addEventListener('keyup', e => {
+    readme.classList.add('UnitReadme--expanded');
+  });
+}
+
+/**
+ * Disable unavailable sections in navigation dropdown on mobile.
+ */
+const readmeOption = document.querySelector('.js-readmeOption');
+if (!readme) {
+  readmeOption.setAttribute('disabled', true);
+}
+
+const unitFiles = document.querySelector('.js-unitFiles');
+const filesOption = document.querySelector('.js-filesOption');
+if (!unitFiles) {
+  filesOption.setAttribute('disabled', true);
+}
+
+const unitDirectories = document.querySelector('.js-unitDirectories');
+const directoriesOption = document.querySelector('.js-directoriesOption');
+if (!unitDirectories) {
+  directoriesOption.setAttribute('disabled', true);
 }

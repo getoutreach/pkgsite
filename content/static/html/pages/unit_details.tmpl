@@ -9,26 +9,28 @@
 {{end}}
 
 {{define "unit_content"}}
-  <div class="UnitDetails">
+  <div class="UnitDetails" data-test-id="UnitDetails">
     {{.Details.MobileOutline}}
     <div class="UnitDetails-outline" role="navigation"
         aria-label="{{if eq .PageType "std"}}module
         {{else}}{{.PageType}}{{end}}details navigation">
       {{block "unit_outline" .Details}}{{end}}
     </div>
-    <div class="UnitDetails-content" role="main">
+    <div class="UnitDetails-content" role="main" data-test-id="UnitDetails-content">
       {{if .Details.Readme.String}}
         {{block "unit_readme" .Details}}{{end}}
       {{end}}
 
-      {{if and .Details.IsPackage .Unit.IsRedistributable}}
-        {{block "unit_doc" .Details}}{{end}}
-      {{else}}
-        <div class="UnitDetails-contentEmpty">
-          <img src="/static/img/gopher-airplane.svg" alt="The Go Gopher"/>
-          <p>Documentation not displayed due to license restrictions.</p>
-          <p>See our <a href="/license-policy">license policy</a>.</p>
-        </div>
+      {{if .Details.IsPackage}}
+        {{if .Unit.IsRedistributable}}
+          {{block "unit_doc" .Details}}{{end}}
+        {{else}}
+          <div class="UnitDetails-contentEmpty">
+            <img src="/static/img/gopher-airplane.svg" alt="The Go Gopher"/>
+            <p>Documentation not displayed due to license restrictions.</p>
+            <p>See our <a href="/license-policy">license policy</a>.</p>
+          </div>
+        {{end}}
       {{end}}
 
       {{if .Details.SourceFiles}}
@@ -44,7 +46,7 @@
   </div>
 
   <dialog class="JumpDialog Dialog">
-    <h2 class="Dialog-title">Jump to identifier</h2>
+    <h2 class="Dialog-title">Jump to</h2>
     <form method="dialog">
       <div class="JumpDialog-filter">
         <input class="JumpDialog-input" autocomplete="off" type="text">
@@ -64,7 +66,7 @@
       <tbody>
         <tr><td class="ShortcutsDialog-key"><b>?</b></td><td> : This menu</td></tr>
         <tr><td class="ShortcutsDialog-key"><b>/</b></td><td> : Search site</td></tr>
-        <tr><td class="ShortcutsDialog-key"><b>f</b> or <b>F</b></td><td> : Jump to identifier</td></tr>
+        <tr><td class="ShortcutsDialog-key"><b>f</b> or <b>F</b></td><td> : Jump to</td></tr>
       </tbody>
     </table>
     <form method="dialog">

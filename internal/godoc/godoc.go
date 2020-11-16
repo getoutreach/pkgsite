@@ -20,11 +20,23 @@ type ModuleInfo = dochtml.ModuleInfo
 // A Package contains package-level information needed to render Go documentation.
 type Package struct {
 	Fset *token.FileSet
-	gobPackage
+	encPackage
 	renderCalled bool
 }
 
-type gobPackage struct { // fields that can be directly gob-encoded
+// encPackage holds the fields of Package that can be directly encoded.
+//
+// If you add any fields, run go generate on this package.
+//
+// If you remove a field, you will have to hand-edit encode_ast.go
+// just to make this package compile before running go generate.
+// Do not remove the field name from the "Fields of" comment, however,
+// or existing encoded data will decode incorrectly.
+//
+// If you rename a field, the field's values in existing encoded
+// data will be lost. Renaming a field is like deleting the old field
+// and adding a new one.
+type encPackage struct { // fields that can be directly encoded
 	GOOS, GOARCH       string
 	Files              []*File
 	ModulePackagePaths map[string]bool
@@ -36,8 +48,8 @@ type File struct {
 	AST  *ast.File
 	// The following fields are only for encoding and decoding. They are public
 	// only because gob requires them to be. Clients should ignore them.
-	UnresolvedNums []int       // used to handle sharing of unresolved identifiers
-	ScopeItems     []scopeItem // sorted by name for deterministic encoding
+	UnresolvedNums []int       `codec:"-"` // used to handle sharing of unresolved identifiers
+	ScopeItems     []scopeItem `codec:"-"` // sorted by name for deterministic encoding
 }
 
 type scopeItem struct {
@@ -49,7 +61,7 @@ type scopeItem struct {
 func NewPackage(fset *token.FileSet, goos, goarch string, modPaths map[string]bool) *Package {
 	return &Package{
 		Fset: fset,
-		gobPackage: gobPackage{
+		encPackage: encPackage{
 			GOOS:               goos,
 			GOARCH:             goarch,
 			ModulePackagePaths: modPaths,

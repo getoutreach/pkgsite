@@ -19,8 +19,8 @@ import (
 )
 
 func TestGetLicenses(t *testing.T) {
-	testModule := sample.LegacyModule(sample.ModulePath, "v1.2.3", "A/B")
-	stdlibModule := sample.LegacyModule(stdlib.ModulePath, "v1.13.0", "cmd/go")
+	testModule := sample.Module(sample.ModulePath, "v1.2.3", "A/B")
+	stdlibModule := sample.Module(stdlib.ModulePath, "v1.13.0", "cmd/go")
 	mit := &licenses.Metadata{Types: []string{"MIT"}, FilePath: "LICENSE"}
 	bsd := &licenses.Metadata{Types: []string{"BSD-3-Clause"}, FilePath: "A/B/LICENSE"}
 
@@ -123,17 +123,17 @@ func TestGetLicenses(t *testing.T) {
 
 func TestGetModuleLicenses(t *testing.T) {
 	modulePath := "test.module"
-	testModule := sample.LegacyModule(modulePath, "v1.2.3", "", "foo", "bar")
-	testModule.LegacyPackages[0].Licenses = []*licenses.Metadata{{Types: []string{"ISC"}, FilePath: "LICENSE"}}
-	testModule.LegacyPackages[1].Licenses = []*licenses.Metadata{{Types: []string{"MIT"}, FilePath: "foo/LICENSE"}}
-	testModule.LegacyPackages[2].Licenses = []*licenses.Metadata{{Types: []string{"GPL2"}, FilePath: "bar/LICENSE.txt"}}
+	testModule := sample.Module(modulePath, "v1.2.3", "", "foo", "bar")
+	testModule.Packages()[0].Licenses = []*licenses.Metadata{{Types: []string{"ISC"}, FilePath: "LICENSE"}}
+	testModule.Packages()[1].Licenses = []*licenses.Metadata{{Types: []string{"MIT"}, FilePath: "foo/LICENSE"}}
+	testModule.Packages()[2].Licenses = []*licenses.Metadata{{Types: []string{"GPL2"}, FilePath: "bar/LICENSE.txt"}}
 
 	defer ResetTestDB(testDB, t)
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 
 	testModule.Licenses = nil
-	for _, p := range testModule.LegacyPackages {
+	for _, p := range testModule.Packages() {
 		testModule.Licenses = append(testModule.Licenses, &licenses.License{
 			Metadata: p.Licenses[0],
 			Contents: []byte(`Lorem Ipsum`),
@@ -198,10 +198,27 @@ func TestGetLicensesBypass(t *testing.T) {
 }
 
 func nonRedistributableModule() *internal.Module {
-	m := sample.LegacyModule(sample.ModulePath, "v1.2.3", "")
+	m := sample.Module(sample.ModulePath, "v1.2.3", "")
 	sample.AddLicense(m, sample.NonRedistributableLicense)
 	m.IsRedistributable = false
-	m.LegacyPackages[0].IsRedistributable = false
+	m.Packages()[0].IsRedistributable = false
 	m.Units[0].IsRedistributable = false
 	return m
+}
+
+// makeModuleNonRedistributable mutates the passed-in module by marking it
+// non-redistributable along with each of its packages and units. It allows
+// us to re-use existing test data without defining a non-redistributable
+// counterpart to each.
+func makeModuleNonRedistributable(m *internal.Module) {
+	sample.AddLicense(m, sample.NonRedistributableLicense)
+	m.IsRedistributable = false
+
+	for _, p := range m.Packages() {
+		p.IsRedistributable = false
+	}
+
+	for i := range m.Units {
+		m.Units[i].IsRedistributable = false
+	}
 }

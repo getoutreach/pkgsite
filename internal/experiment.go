@@ -6,26 +6,24 @@
 package internal
 
 const (
-	ExperimentAltRequeue          = "alt-requeue"
 	ExperimentAutocomplete        = "autocomplete"
+	ExperimentFasterDecoding      = "faster-decoding"
 	ExperimentFrontendRenderDoc   = "frontend-render-doc"
+	ExperimentGetUnitWithOneQuery = "get-unit-with-one-query"
 	ExperimentGoldmark            = "goldmark"
-	ExperimentInsertPackageSource = "insert-package-source"
 	ExperimentRemoveUnusedAST     = "remove-unused-ast"
-	ExperimentSidenav             = "sidenav"
 	ExperimentUnitPage            = "unit-page"
 )
 
 // Experiments represents all of the active experiments in the codebase and
 // a description of each experiment.
 var Experiments = map[string]string{
-	ExperimentAltRequeue:          "Requeue modules for reprocessing in a different order.",
 	ExperimentAutocomplete:        "Enable autocomplete with search.",
+	ExperimentFasterDecoding:      "Decode ASTs faster.",
 	ExperimentFrontendRenderDoc:   "Render documentation on the frontend if possible.",
+	ExperimentGetUnitWithOneQuery: "Fetch data for GetUnit using a single query.",
 	ExperimentGoldmark:            "Enable the usage of rendering markdown using goldmark instead of blackfriday.",
-	ExperimentInsertPackageSource: "Insert the source code of a package in the database.",
 	ExperimentRemoveUnusedAST:     "Prune AST prior to rendering documentation HTML.",
-	ExperimentSidenav:             "Display documentation index on the left sidenav.",
 	ExperimentUnitPage:            "Enable the redesigned details page.",
 }
 

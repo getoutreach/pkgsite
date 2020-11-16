@@ -153,20 +153,32 @@ func TestPathTokens(t *testing.T) {
 // one popular package.  For performance purposes, all importers are added to
 // a single importing module.
 func importGraph(popularPath, importerModule string, importerCount int) []*internal.Module {
-	m := sample.LegacyModule(popularPath, "v1.2.3", "")
+	m := sample.Module(popularPath, "v1.2.3", "")
 	m.Packages()[0].Imports = nil
 	// Try to improve the ts_rank of the 'foo' search term.
 	m.Packages()[0].Documentation.Synopsis = "foo"
 	m.Units[0].Readme.Contents = "foo"
 	mods := []*internal.Module{m}
+
 	if importerCount > 0 {
-		m := sample.LegacyModule(importerModule, "v1.2.3")
+		m := sample.Module(importerModule, "v1.2.3")
 		for i := 0; i < importerCount; i++ {
-			p := sample.LegacyPackage(importerModule, fmt.Sprintf("importer%d", i))
-			p.Imports = []string{popularPath}
-			sample.LegacyAddPackage(m, p)
+			name := fmt.Sprintf("importer%d", i)
+			fullPath := importerModule + "/" + name
+			u := &internal.Unit{
+				UnitMeta: *sample.UnitMeta(fullPath, importerModule, m.Version, name, true),
+				Documentation: &internal.Documentation{
+					Synopsis: sample.Synopsis,
+					GOOS:     sample.GOOS,
+					GOARCH:   sample.GOARCH,
+					HTML:     sample.DocumentationHTML,
+					Source:   []byte{},
+				},
+				Imports: []string{popularPath},
+			}
+			sample.AddUnit(m, u)
+			mods = append(mods, m)
 		}
-		mods = append(mods, m)
 	}
 	return mods
 }
@@ -284,7 +296,7 @@ func TestSearch(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.label, func(t *testing.T) {
 			defer ResetTestDB(testDB, t)
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 			defer cancel()
 			for _, m := range test.modules {
 				if err := testDB.InsertModule(ctx, m); err != nil {
@@ -401,26 +413,36 @@ func TestSearchErrors(t *testing.T) {
 func TestInsertSearchDocumentAndSearch(t *testing.T) {
 	var (
 		modGoCDK = "gocloud.dev"
-		pkgGoCDK = &internal.LegacyPackage{
-			Name:              "cloud",
-			Path:              "gocloud.dev/cloud",
-			Synopsis:          "Package cloud contains a library and tools for open cloud development in Go. The Go Cloud Development Kit (Go CDK)",
-			IsRedistributable: true, // required because some test cases depend on the README contents
+		pkgGoCDK = &internal.Unit{
+			UnitMeta: internal.UnitMeta{
+				Name:              "cloud",
+				Path:              "gocloud.dev/cloud",
+				IsRedistributable: true, // required because some test cases depend on the README contents
+			},
+			Documentation: &internal.Documentation{
+				Synopsis: "Package cloud contains a library and tools for open cloud development in Go. The Go Cloud Development Kit (Go CDK)",
+				Source:   []byte{},
+			},
 		}
 
 		modKube = "k8s.io"
-		pkgKube = &internal.LegacyPackage{
-			Name:              "client-go",
-			Path:              "k8s.io/client-go",
-			Synopsis:          "Package client-go implements a Go client for Kubernetes.",
-			IsRedistributable: true, // required because some test cases depend on the README contents
+		pkgKube = &internal.Unit{
+			UnitMeta: internal.UnitMeta{
+				Name:              "client-go",
+				Path:              "k8s.io/client-go",
+				IsRedistributable: true, // required because some test cases depend on the README contents
+			},
+			Documentation: &internal.Documentation{
+				Synopsis: "Package client-go implements a Go client for Kubernetes.",
+				Source:   []byte{},
+			},
 		}
 
 		kubeResult = func(score float64, numResults uint64) *internal.SearchResult {
 			return &internal.SearchResult{
 				Name:        pkgKube.Name,
 				PackagePath: pkgKube.Path,
-				Synopsis:    pkgKube.Synopsis,
+				Synopsis:    pkgKube.Documentation.Synopsis,
 				Licenses:    []string{"MIT"},
 				CommitTime:  sample.CommitTime,
 				Version:     sample.VersionString,
@@ -434,7 +456,7 @@ func TestInsertSearchDocumentAndSearch(t *testing.T) {
 			return &internal.SearchResult{
 				Name:        pkgGoCDK.Name,
 				PackagePath: pkgGoCDK.Path,
-				Synopsis:    pkgGoCDK.Synopsis,
+				Synopsis:    pkgGoCDK.Documentation.Synopsis,
 				Licenses:    []string{"MIT"},
 				CommitTime:  sample.CommitTime,
 				Version:     sample.VersionString,
@@ -453,7 +475,7 @@ func TestInsertSearchDocumentAndSearch(t *testing.T) {
 
 	for _, tc := range []struct {
 		name          string
-		packages      map[string]*internal.LegacyPackage
+		packages      map[string]*internal.Unit
 		limit, offset int
 		searchQuery   string
 		want          []*internal.SearchResult
@@ -461,7 +483,7 @@ func TestInsertSearchDocumentAndSearch(t *testing.T) {
 		{
 			name:        "two documents, single term search",
 			searchQuery: "package",
-			packages: map[string]*internal.LegacyPackage{
+			packages: map[string]*internal.Unit{
 				modGoCDK: pkgGoCDK,
 				modKube:  pkgKube,
 			},
@@ -475,7 +497,7 @@ func TestInsertSearchDocumentAndSearch(t *testing.T) {
 			limit:       1,
 			offset:      0,
 			searchQuery: "package",
-			packages: map[string]*internal.LegacyPackage{
+			packages: map[string]*internal.Unit{
 				modKube:  pkgKube,
 				modGoCDK: pkgGoCDK,
 			},
@@ -488,7 +510,7 @@ func TestInsertSearchDocumentAndSearch(t *testing.T) {
 			limit:       1,
 			offset:      1,
 			searchQuery: "package",
-			packages: map[string]*internal.LegacyPackage{
+			packages: map[string]*internal.Unit{
 				modGoCDK: pkgGoCDK,
 				modKube:  pkgKube,
 			},
@@ -499,7 +521,7 @@ func TestInsertSearchDocumentAndSearch(t *testing.T) {
 		{
 			name:        "two documents, multiple term search",
 			searchQuery: "go & cdk",
-			packages: map[string]*internal.LegacyPackage{
+			packages: map[string]*internal.Unit{
 				modGoCDK: pkgGoCDK,
 				modKube:  pkgKube,
 			},
@@ -510,7 +532,7 @@ func TestInsertSearchDocumentAndSearch(t *testing.T) {
 		{
 			name:        "one document, single term search",
 			searchQuery: "cloud",
-			packages: map[string]*internal.LegacyPackage{
+			packages: map[string]*internal.Unit{
 				modGoCDK: pkgGoCDK,
 			},
 			want: []*internal.SearchResult{
@@ -527,8 +549,8 @@ func TestInsertSearchDocumentAndSearch(t *testing.T) {
 
 				for modulePath, pkg := range tc.packages {
 					pkg.Licenses = sample.LicenseMetadata
-					m := sample.LegacyModule(modulePath, sample.VersionString)
-					sample.LegacyAddPackage(m, pkg)
+					m := sample.Module(modulePath, sample.VersionString)
+					sample.AddUnit(m, pkg)
 					if err := testDB.InsertModule(ctx, m); err != nil {
 						t.Fatal(err)
 					}
@@ -582,8 +604,8 @@ func TestSearchPenalties(t *testing.T) {
 	}
 
 	for path, m := range modules {
-		v := sample.LegacyModule(path, sample.VersionString, "p")
-		v.LegacyPackages[0].IsRedistributable = m.redist
+		v := sample.Module(path, sample.VersionString, "p")
+		v.Packages()[0].IsRedistributable = m.redist
 		v.IsRedistributable = m.redist
 		v.HasGoMod = m.hasGoMod
 		if err := testDB.InsertModule(ctx, v); err != nil {
@@ -619,7 +641,7 @@ func TestExcludedFromSearch(t *testing.T) {
 
 	// Insert a module with two packages.
 	const domain = "exclude.com"
-	sm := sample.LegacyModule(domain, "v1.2.3", "pkg", "ex/clude")
+	sm := sample.Module(domain, "v1.2.3", "pkg", "ex/clude")
 	if err := testDB.InsertModule(ctx, sm); err != nil {
 		t.Fatal(err)
 	}
@@ -740,10 +762,10 @@ func TestUpsertSearchDocument(t *testing.T) {
 	}
 
 	insertModule := func(version string, gomod bool) {
-		v := sample.LegacyModule(sample.ModulePath, version, "A")
-		v.HasGoMod = gomod
-		v.LegacyPackages[0].Synopsis = "syn-" + version
-		if err := testDB.InsertModule(ctx, v); err != nil {
+		m := sample.Module(sample.ModulePath, version, "A")
+		m.HasGoMod = gomod
+		m.Packages()[0].Documentation.Synopsis = "syn-" + version
+		if err := testDB.InsertModule(ctx, m); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -785,7 +807,7 @@ func TestUpsertSearchDocumentVersionHasGoMod(t *testing.T) {
 	defer cancel()
 
 	for _, hasGoMod := range []bool{true, false} {
-		m := sample.LegacyModule(fmt.Sprintf("foo.com/%t", hasGoMod), "v1.2.3", "bar")
+		m := sample.Module(fmt.Sprintf("foo.com/%t", hasGoMod), "v1.2.3", "bar")
 		m.HasGoMod = hasGoMod
 		if err := testDB.InsertModule(ctx, m); err != nil {
 			t.Fatal(err)
@@ -811,7 +833,7 @@ func TestUpdateSearchDocumentsImportedByCount(t *testing.T) {
 	// insert package with suffix at version, return the module
 	insertPackageVersion := func(t *testing.T, suffix, version string, imports []string) *internal.Module {
 		t.Helper()
-		m := sample.LegacyModule("mod.com/"+suffix, version, suffix)
+		m := sample.Module("mod.com/"+suffix, version, suffix)
 		// Units[0] is the module itself.
 		pkg := m.Units[1]
 		pkg.Imports = nil
@@ -844,7 +866,7 @@ func TestUpdateSearchDocumentsImportedByCount(t *testing.T) {
 		return sd
 	}
 
-	pkgPath := func(m *internal.Module) string { return m.LegacyPackages[0].Path }
+	pkgPath := func(m *internal.Module) string { return m.Packages()[0].Path }
 
 	t.Run("basic", func(t *testing.T) {
 		defer ResetTestDB(testDB, t)
@@ -918,8 +940,8 @@ func TestUpdateSearchDocumentsImportedByCount(t *testing.T) {
 
 		// Now we see an earlier version of that package, without a go.mod file, so we insert it.
 		// It should not get inserted into search_documents.
-		mAlt := sample.LegacyModule(alternativeModulePath, "v1.0.0", "A")
-		mAlt.LegacyPackages[0].Imports = []string{"B"}
+		mAlt := sample.Module(alternativeModulePath, "v1.0.0", "A")
+		mAlt.Packages()[0].Imports = []string{"B"}
 		if err := testDB.InsertModule(ctx, mAlt); err != nil {
 			t.Fatal(err)
 		}
@@ -936,7 +958,7 @@ func TestGetPackagesForSearchDocumentUpsert(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 
-	moduleA := sample.LegacyModule("mod.com", "v1.2.3",
+	moduleA := sample.Module("mod.com", "v1.2.3",
 		"A", "A/notinternal", "A/internal", "A/internal/B")
 
 	// moduleA.Units[1] is mod.com/A.
@@ -1080,7 +1102,7 @@ func TestDeleteOlderVersionFromSearch(t *testing.T) {
 		wantDeleted bool
 	}
 	insert := func(m module) {
-		sm := sample.LegacyModule(m.path, m.version, m.pkg)
+		sm := sample.Module(m.path, m.version, m.pkg)
 		if err := testDB.InsertModule(ctx, sm); err != nil {
 			t.Fatal(err)
 		}

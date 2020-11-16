@@ -63,6 +63,14 @@ type RenderOptions struct {
 	Limit   int64 // If zero, a default limit of 10 megabytes is used.
 }
 
+// templateData holds the data passed to the HTML templates in this package.
+type templateData struct {
+	RootURL string
+	*doc.Package
+	Examples    *examples
+	NoteHeaders map[string]noteHeader
+}
+
 // Render renders package documentation HTML for the
 // provided file set and package.
 //
@@ -75,6 +83,79 @@ func Render(ctx context.Context, fset *token.FileSet, p *doc.Package, opt Render
 		opt.Limit = 10 * megabyte
 	}
 
+	funcs, data := renderInfo(ctx, fset, p, opt)
+	p = data.Package
+	if experiment.IsActive(ctx, internal.ExperimentUnitPage) {
+		if p.Doc == "" &&
+			len(p.Examples) == 0 &&
+			len(p.Consts) == 0 &&
+			len(p.Vars) == 0 &&
+			len(p.Types) == 0 &&
+			len(p.Funcs) == 0 {
+			return safehtml.HTML{}, nil
+		}
+	}
+
+	h := htmlPackage(ctx)
+	tmpl := template.Must(h.Clone()).Funcs(funcs)
+	return executeToHTMLWithLimit(tmpl, data, opt.Limit)
+}
+
+// Render renders package documentation HTML for the
+// provided file set and package, in separate parts.
+//
+// If any of the rendered documentation part HTML sizes exceeds the specified limit,
+// an error with ErrTooLarge in its chain will be returned.
+func RenderParts(ctx context.Context, fset *token.FileSet, p *doc.Package, opt RenderOptions) (body, outline, mobileOutline safehtml.HTML, err error) {
+	defer derrors.Wrap(&err, "dochtml.RenderParts")
+
+	if !experiment.IsActive(ctx, internal.ExperimentUnitPage) {
+		return safehtml.HTML{}, safehtml.HTML{}, safehtml.HTML{}, errors.New("should only be called if the unit-page experiment is active")
+	}
+
+	if opt.Limit == 0 {
+		const megabyte = 1000 * 1000
+		opt.Limit = 10 * megabyte
+	}
+
+	funcs, data := renderInfo(ctx, fset, p, opt)
+	p = data.Package
+	if p.Doc == "" &&
+		len(p.Examples) == 0 &&
+		len(p.Consts) == 0 &&
+		len(p.Vars) == 0 &&
+		len(p.Types) == 0 &&
+		len(p.Funcs) == 0 {
+		return safehtml.HTML{}, safehtml.HTML{}, safehtml.HTML{}, nil
+	}
+	h := htmlPackage(ctx)
+	tmpl := template.Must(h.Clone()).Funcs(funcs)
+
+	exec := func(name string) safehtml.HTML {
+		if err != nil {
+			return safehtml.HTML{}
+		}
+		t := tmpl.Lookup(name)
+		if t == nil {
+			err = fmt.Errorf("missing %s", name)
+			return safehtml.HTML{}
+		}
+		var html safehtml.HTML
+		html, err = executeToHTMLWithLimit(t, data, opt.Limit)
+		return html
+	}
+
+	body = exec("body.tmpl")
+	outline = exec("sidenav.tmpl")
+	mobileOutline = exec("sidenav-mobile.tmpl")
+	if err != nil {
+		return safehtml.HTML{}, safehtml.HTML{}, safehtml.HTML{}, err
+	}
+	return body, outline, mobileOutline, nil
+}
+
+// renderInfo returns the functions and data needed to render the doc.
+func renderInfo(ctx context.Context, fset *token.FileSet, p *doc.Package, opt RenderOptions) (map[string]interface{}, templateData) {
 	// Make a copy to avoid modifying caller's *doc.Package.
 	p2 := *p
 	p = &p2
@@ -118,20 +199,7 @@ func Render(ctx context.Context, fset *token.FileSet, p *doc.Package, opt Render
 	sourceLink := func(name string, node ast.Node) safehtml.HTML {
 		return linkHTML(name, opt.SourceLinkFunc(node), "Documentation-source")
 	}
-
-	if experiment.IsActive(ctx, internal.ExperimentUnitPage) {
-		if p.Doc == "" &&
-			len(p.Examples) == 0 &&
-			len(p.Consts) == 0 &&
-			len(p.Vars) == 0 &&
-			len(p.Types) == 0 &&
-			len(p.Funcs) == 0 {
-			return safehtml.HTML{}, nil
-		}
-	}
-
-	h := htmlPackage(ctx)
-	tmpl := template.Must(h.Clone()).Funcs(map[string]interface{}{
+	funcs := map[string]interface{}{
 		"render_short_synopsis": r.ShortSynopsis,
 		"render_synopsis":       r.Synopsis,
 		"render_doc":            r.DocHTML,
@@ -139,19 +207,14 @@ func Render(ctx context.Context, fset *token.FileSet, p *doc.Package, opt Render
 		"render_code":           r.CodeHTML,
 		"file_link":             fileLink,
 		"source_link":           sourceLink,
-	})
-	data := struct {
-		RootURL string
-		*doc.Package
-		Examples *examples
-		NoteIDs  map[string]safehtml.Identifier
-	}{
-		RootURL:  "/pkg",
-		Package:  p,
-		Examples: collectExamples(p),
-		NoteIDs:  buildNoteIDs(p.Notes),
 	}
-	return executeToHTMLWithLimit(tmpl, data, opt.Limit)
+	data := templateData{
+		RootURL:     "/pkg",
+		Package:     p,
+		Examples:    collectExamples(p),
+		NoteHeaders: buildNoteHeaders(p.Notes),
+	}
+	return funcs, data
 }
 
 // executeToHTMLWithLimit executes tmpl on data and returns the result as a safehtml.HTML.
@@ -164,6 +227,7 @@ func executeToHTMLWithLimit(tmpl *template.Template, data interface{}, limit int
 	} else if err != nil {
 		return safehtml.HTML{}, fmt.Errorf("dochtml.Render: %v", err)
 	}
+
 	// This is safe because we're executing a safehtml template and not modifying the result afterwards.
 	// We're just doing what safehtml/template.Template.ExecuteToHTML does
 	// (https://github.com/google/safehtml/blob/b8ae3e5e1ce3/template/template.go#L136).
@@ -276,14 +340,24 @@ func exampleID(id, suffix string) safehtml.Identifier {
 	}
 }
 
-// buildNoteIDs constructs safehtml identifiers from note markers.
-// It returns a map from each marker to its corresponding safehtml ID.
-func buildNoteIDs(notes map[string][]*doc.Note) map[string]safehtml.Identifier {
-	ids := map[string]safehtml.Identifier{}
+// noteHeader contains informations the template needs to render
+// the note related HTML tags in documentation page.
+type noteHeader struct {
+	SafeIdentifier safehtml.Identifier
+	Label          string
+}
+
+// buildNoteHeaders constructs note headers from note markers.
+// It returns a map from each marker to its corresponding noteHeader.
+func buildNoteHeaders(notes map[string][]*doc.Note) map[string]noteHeader {
+	headers := map[string]noteHeader{}
 	for marker := range notes {
-		ids[marker] = safehtml.IdentifierFromConstantPrefix("pkg-note", marker)
+		headers[marker] = noteHeader{
+			SafeIdentifier: safehtml.IdentifierFromConstantPrefix("pkg-note", marker),
+			Label:          strings.Title(strings.ToLower(marker)),
+		}
 	}
-	return ids
+	return headers
 }
 
 // versionedPkgPath transforms package paths to contain the same version as the

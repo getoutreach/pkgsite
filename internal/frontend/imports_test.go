@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"golang.org/x/pkgsite/internal"
+	"golang.org/x/pkgsite/internal/experiment"
 	"golang.org/x/pkgsite/internal/postgres"
 	"golang.org/x/pkgsite/internal/testing/sample"
 )
@@ -49,7 +50,7 @@ func TestFetchImportsDetails(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 			defer cancel()
 
-			module := sample.LegacyModule(sample.ModulePath, sample.VersionString, sample.Suffix)
+			module := sample.Module(sample.ModulePath, sample.VersionString, sample.Suffix)
 			// The first unit is the module and the second one is the package.
 			pkg := module.Units[1]
 			pkg.Imports = tc.imports
@@ -78,19 +79,19 @@ func TestFetchImportedByDetails(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 
-	newModule := func(modPath string, pkgs ...*internal.LegacyPackage) *internal.Module {
-		m := sample.LegacyModule(modPath, sample.VersionString)
+	newModule := func(modPath string, pkgs ...*internal.Unit) *internal.Module {
+		m := sample.Module(modPath, sample.VersionString)
 		for _, p := range pkgs {
-			sample.LegacyAddPackage(m, p)
+			sample.AddUnit(m, p)
 		}
 		return m
 	}
 
-	pkg1 := sample.LegacyPackage("path.to/foo", "bar")
-	pkg2 := sample.LegacyPackage("path2.to/foo", "bar2")
+	pkg1 := sample.UnitForPackage("path.to/foo/bar", "path.to/foo", sample.VersionString, "bar", true)
+	pkg2 := sample.UnitForPackage("path2.to/foo/bar2", "path2.to/foo", sample.VersionString, "bar2", true)
 	pkg2.Imports = []string{pkg1.Path}
 
-	pkg3 := sample.LegacyPackage("path3.to/foo", "bar3")
+	pkg3 := sample.UnitForPackage("path3.to/foo/bar3", "path3.to/foor", sample.VersionString, "bar3", true)
 	pkg3.Imports = []string{pkg2.Path, pkg1.Path}
 
 	testModules := []*internal.Module{
@@ -105,8 +106,8 @@ func TestFetchImportedByDetails(t *testing.T) {
 		}
 	}
 
-	for _, tc := range []struct {
-		pkg         *internal.LegacyPackage
+	tests := []struct {
+		pkg         *internal.Unit
 		wantDetails *ImportedByDetails
 	}{
 		{
@@ -132,21 +133,33 @@ func TestFetchImportedByDetails(t *testing.T) {
 				TotalIsExact: true,
 			},
 		},
-	} {
-		t.Run(tc.pkg.Path, func(t *testing.T) {
-			otherVersion := newModule(path.Dir(tc.pkg.Path), tc.pkg)
+	}
+
+	checkFetchImportedByDetails := func(ctx context.Context, pkg *internal.Unit, wantDetails *ImportedByDetails) {
+		got, err := fetchImportedByDetails(ctx, testDB, pkg.Path, pkg.ModulePath)
+		if err != nil {
+			t.Fatalf("fetchImportedByDetails(ctx, db, %q) = %v err = %v, want %v",
+				pkg.Path, got, err, wantDetails)
+		}
+		wantDetails.ModulePath = pkg.ModulePath
+		if diff := cmp.Diff(wantDetails, got); diff != "" {
+			t.Errorf("fetchImportedByDetails(ctx, db, %q) mismatch (-want +got):\n%s", pkg.Path, diff)
+		}
+	}
+	for _, test := range tests {
+		t.Run(test.pkg.Path, func(t *testing.T) {
+			otherVersion := newModule(path.Dir(test.pkg.Path), test.pkg)
 			otherVersion.Version = "v1.0.5"
 			pkg := otherVersion.Units[1]
-			got, err := fetchImportedByDetails(ctx, testDB, pkg.Path, pkg.ModulePath)
-			if err != nil {
-				t.Fatalf("fetchImportedByDetails(ctx, db, %q) = %v err = %v, want %v",
-					tc.pkg.Path, got, err, tc.wantDetails)
-			}
 
-			tc.wantDetails.ModulePath = pkg.ModulePath
-			if diff := cmp.Diff(tc.wantDetails, got); diff != "" {
-				t.Errorf("fetchImportedByDetails(ctx, db, %q) mismatch (-want +got):\n%s", tc.pkg.Path, diff)
-			}
+			t.Run("no experiments "+test.pkg.Name, func(t *testing.T) {
+				checkFetchImportedByDetails(ctx, pkg, test.wantDetails)
+			})
+			t.Run("get imported by from search_documents "+test.pkg.Name, func(t *testing.T) {
+				ctx := experiment.NewContext(ctx, internal.ExperimentGetUnitWithOneQuery)
+				testDB.UpdateSearchDocumentsImportedByCount(ctx)
+				checkFetchImportedByDetails(ctx, pkg, test.wantDetails)
+			})
 		})
 	}
 }

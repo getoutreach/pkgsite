@@ -14,8 +14,10 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
+	"github.com/google/safehtml/template"
 	"golang.org/x/pkgsite/internal"
 	"golang.org/x/pkgsite/internal/derrors"
+	"golang.org/x/pkgsite/internal/godoc/dochtml"
 	"golang.org/x/pkgsite/internal/licenses"
 	"golang.org/x/pkgsite/internal/proxy"
 	"golang.org/x/pkgsite/internal/testing/sample"
@@ -24,6 +26,8 @@ import (
 
 func setup(t *testing.T) (context.Context, *DataSource, func()) {
 	t.Helper()
+	dochtml.LoadTemplates(template.TrustedSourceFromConstant("../../content/static/html/doc"))
+
 	contents := map[string]string{
 		"go.mod":     "module foo.com/bar",
 		"LICENSE":    testhelper.MITLicense,
@@ -63,16 +67,22 @@ func setup(t *testing.T) (context.Context, *DataSource, func()) {
 
 var (
 	wantLicenseMD = sample.LicenseMetadata[0]
-	wantPackage   = internal.LegacyPackage{
-		Path:              "foo.com/bar/baz",
-		Name:              "baz",
-		Imports:           []string{"net/http"},
-		Synopsis:          "Package baz provides a helpful constant.",
-		V1Path:            "foo.com/bar/baz",
-		Licenses:          []*licenses.Metadata{wantLicenseMD},
-		IsRedistributable: true,
-		GOOS:              "linux",
-		GOARCH:            "amd64",
+	wantPackage   = internal.Unit{
+		UnitMeta: internal.UnitMeta{
+			Path:              "foo.com/bar/baz",
+			Name:              "baz",
+			ModulePath:        "foo.com/bar",
+			Version:           "v1.2.0",
+			CommitTime:        time.Date(2019, 1, 30, 0, 0, 0, 0, time.UTC),
+			Licenses:          []*licenses.Metadata{wantLicenseMD},
+			IsRedistributable: true,
+		},
+		Imports: []string{"net/http"},
+		Documentation: &internal.Documentation{
+			Synopsis: "Package baz provides a helpful constant.",
+			GOOS:     "linux",
+			GOARCH:   "amd64",
+		},
 	}
 	wantModuleInfo = internal.ModuleInfo{
 		ModulePath:        "foo.com/bar",
@@ -82,7 +92,7 @@ var (
 		HasGoMod:          true,
 	}
 	cmpOpts = append([]cmp.Option{
-		cmpopts.IgnoreFields(internal.LegacyPackage{}, "DocumentationHTML"),
+		cmpopts.IgnoreFields(internal.Documentation{}, "HTML"),
 		cmpopts.IgnoreFields(licenses.License{}, "Contents"),
 	}, sample.LicenseCmpOpts...)
 )
