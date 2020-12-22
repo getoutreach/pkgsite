@@ -8,9 +8,12 @@ package queue
 
 import (
 	"context"
-	"crypto/sha256"
 	"errors"
 	"fmt"
+	"hash/fnv"
+	"io"
+	"math"
+	"strings"
 	"time"
 
 	cloudtasks "cloud.google.com/go/cloudtasks/apiv2"
@@ -27,7 +30,7 @@ import (
 
 // A Queue provides an interface for asynchronous scheduling of fetch actions.
 type Queue interface {
-	ScheduleFetch(ctx context.Context, modulePath, version, suffix string, taskIDChangeInterval time.Duration) (bool, error)
+	ScheduleFetch(ctx context.Context, modulePath, version, suffix string, disableProxyFetch bool) (bool, error)
 }
 
 // New creates a new Queue with name queueName based on the configuration
@@ -55,17 +58,16 @@ func New(ctx context.Context, cfg *config.Config, queueName string, numWorkers i
 	if err != nil {
 		return nil, err
 	}
-	log.Infof(ctx, "enqueuing at %s with queueService=%q, queueURL=%q", g.queueName, g.queueService, g.queueURL)
+	log.Infof(ctx, "enqueuing at %s with queueURL=%q", g.queueName, g.queueURL)
 	return g, nil
 }
 
 // GCP provides a Queue implementation backed by the Google Cloud Tasks
 // API.
 type GCP struct {
-	client       *cloudtasks.Client
-	queueName    string // full GCP name of the queue
-	queueService string // AppEngine service to post tasks to
-	queueURL     string // non-AppEngine URL to post tasks to
+	client    *cloudtasks.Client
+	queueName string // full GCP name of the queue
+	queueURL  string // non-AppEngine URL to post tasks to
 	// token holds information that lets the task queue construct an authorized request to the worker.
 	// Since the worker sits behind the IAP, the queue needs an identity token that includes the
 	// identity of a service account that has access, and the client ID for the IAP.
@@ -87,28 +89,19 @@ func newGCP(cfg *config.Config, client *cloudtasks.Client, queueID string) (_ *G
 	if cfg.LocationID == "" {
 		return nil, errors.New("empty LocationID")
 	}
-	if cfg.QueueService == "" && cfg.QueueURL == "" {
-		return nil, errors.New("both QueueService and QueueURL are empty")
+	if cfg.QueueURL == "" {
+		return nil, errors.New("empty QueueURL")
 	}
-	if cfg.QueueService != "" && cfg.QueueURL != "" {
-		return nil, errors.New("both  QueueService and QueueURL are non-empty")
+	if cfg.ServiceAccount == "" {
+		return nil, errors.New("empty ServiceAccount")
 	}
-	if cfg.OnAppEngine() && cfg.QueueService == "" {
-		return nil, errors.New("on AppEngine, but QueueService is empty")
-	}
-	if cfg.QueueURL != "" {
-		if cfg.ServiceAccount == "" {
-			return nil, errors.New("need ServiceAccount with QueueURL")
-		}
-		if cfg.QueueAudience == "" {
-			return nil, errors.New("need QueueAudience with QueueURL")
-		}
+	if cfg.QueueAudience == "" {
+		return nil, errors.New("empty QueueAudience")
 	}
 	return &GCP{
-		client:       client,
-		queueName:    fmt.Sprintf("projects/%s/locations/%s/queues/%s", cfg.ProjectID, cfg.LocationID, queueID),
-		queueService: cfg.QueueService,
-		queueURL:     cfg.QueueURL,
+		client:    client,
+		queueName: fmt.Sprintf("projects/%s/locations/%s/queues/%s", cfg.ProjectID, cfg.LocationID, queueID),
+		queueURL:  cfg.QueueURL,
 		token: &taskspb.HttpRequest_OidcToken{
 			OidcToken: &taskspb.OidcToken{
 				ServiceAccountEmail: cfg.ServiceAccount,
@@ -121,13 +114,13 @@ func newGCP(cfg *config.Config, client *cloudtasks.Client, queueID string) (_ *G
 // ScheduleFetch enqueues a task on GCP to fetch the given modulePath and
 // version. It returns an error if there was an error hashing the task name, or
 // an error pushing the task to GCP. If the task was a duplicate, it returns (false, nil).
-func (q *GCP) ScheduleFetch(ctx context.Context, modulePath, version, suffix string, taskIDChangeInterval time.Duration) (enqueued bool, err error) {
+func (q *GCP) ScheduleFetch(ctx context.Context, modulePath, version, suffix string, disableProxyFetch bool) (enqueued bool, err error) {
 	// the new taskqueue API requires a deadline of <= 30s
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	defer derrors.Wrap(&err, "queue.ScheduleFetch(%q, %q, %q, %d)", modulePath, version, suffix, taskIDChangeInterval)
+	defer derrors.Wrap(&err, "queue.ScheduleFetch(%q, %q, %q)", modulePath, version, suffix)
 
-	req := q.newTaskRequest(modulePath, version, suffix, taskIDChangeInterval)
+	req := q.newTaskRequest(modulePath, version, suffix, disableProxyFetch)
 	enqueued = true
 	if _, err := q.client.CreateTask(ctx, req); err != nil {
 		if status.Code(err) == codes.AlreadyExists {
@@ -144,31 +137,27 @@ func (q *GCP) ScheduleFetch(ctx context.Context, modulePath, version, suffix str
 // See https://cloud.google.com/tasks/docs/creating-http-target-tasks.
 const maxCloudTasksTimeout = 30 * time.Minute
 
-func (q *GCP) newTaskRequest(modulePath, version, suffix string, taskIDChangeInterval time.Duration) *taskspb.CreateTaskRequest {
-	taskID := newTaskID(modulePath, version, time.Now(), taskIDChangeInterval)
+const (
+	DisableProxyFetchParam = "proxyfetch"
+	DisableProxyFetchValue = "off"
+)
+
+func (q *GCP) newTaskRequest(modulePath, version, suffix string, disableProxyFetch bool) *taskspb.CreateTaskRequest {
+	taskID := newTaskID(modulePath, version)
 	relativeURI := fmt.Sprintf("/fetch/%s/@v/%s", modulePath, version)
+	if disableProxyFetch {
+		relativeURI += fmt.Sprintf("?%s=%s", DisableProxyFetchParam, DisableProxyFetchValue)
+	}
 	task := &taskspb.Task{
 		Name:             fmt.Sprintf("%s/tasks/%s", q.queueName, taskID),
 		DispatchDeadline: ptypes.DurationProto(maxCloudTasksTimeout),
 	}
-	if q.queueService != "" {
-		task.MessageType = &taskspb.Task_AppEngineHttpRequest{
-			AppEngineHttpRequest: &taskspb.AppEngineHttpRequest{
-				HttpMethod:  taskspb.HttpMethod_POST,
-				RelativeUri: relativeURI,
-				AppEngineRouting: &taskspb.AppEngineRouting{
-					Service: q.queueService,
-				},
-			},
-		}
-	} else {
-		task.MessageType = &taskspb.Task_HttpRequest{
-			HttpRequest: &taskspb.HttpRequest{
-				HttpMethod:          taskspb.HttpMethod_POST,
-				Url:                 q.queueURL + relativeURI,
-				AuthorizationHeader: q.token,
-			},
-		}
+	task.MessageType = &taskspb.Task_HttpRequest{
+		HttpRequest: &taskspb.HttpRequest{
+			HttpMethod:          taskspb.HttpMethod_POST,
+			Url:                 q.queueURL + relativeURI,
+			AuthorizationHeader: q.token,
+		},
 	}
 	req := &taskspb.CreateTaskRequest{
 		Parent: q.queueName,
@@ -184,15 +173,33 @@ func (q *GCP) newTaskRequest(modulePath, version, suffix string, taskIDChangeInt
 
 // Create a task ID for the given module path and version.
 // Task IDs can contain only letters ([A-Za-z]), numbers ([0-9]), hyphens (-), or underscores (_).
-// Also include a truncated time in the hash, so it changes periodically.
-//
-// Since we truncate the time to the nearest taskIDChangeInterval, it's still possible
-// for two identical tasks to appear within that time period (for example, one at 2:59
-// and the other at 3:01) -- each is part of a different taskIDChangeInterval-sized chunk
-// of time. But there will never be a third identical task in that interval.
-func newTaskID(modulePath, version string, now time.Time, taskIDChangeInterval time.Duration) string {
-	t := now.Truncate(taskIDChangeInterval)
-	return fmt.Sprintf("%x", sha256.Sum256([]byte(modulePath+"@"+version+"-"+t.String())))
+func newTaskID(modulePath, version string) string {
+	mv := modulePath + "@" + version
+	// Compute a hash to use as a prefix, so the task IDs are distributed uniformly.
+	// See https://cloud.google.com/tasks/docs/reference/rpc/google.cloud.tasks.v2#task
+	// under "Task De-duplication".
+	hasher := fnv.New32()
+	io.WriteString(hasher, mv)
+	hash := hasher.Sum32() % math.MaxUint16
+	// Escape the name so it contains only valid characters. Do our best to make it readable.
+	var b strings.Builder
+	for _, r := range mv {
+		switch {
+		case r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-':
+			b.WriteRune(r)
+		case r == '_':
+			b.WriteString("__")
+		case r == '/':
+			b.WriteString("_-")
+		case r == '@':
+			b.WriteString("_v")
+		case r == '.':
+			b.WriteString("_o")
+		default:
+			fmt.Fprintf(&b, "_%04x", r)
+		}
+	}
+	return fmt.Sprintf("%04x-%s", hash, &b)
 }
 
 type moduleVersion struct {
@@ -251,7 +258,7 @@ func NewInMemory(ctx context.Context, workerCount int, experiments []string, pro
 
 // ScheduleFetch pushes a fetch task into the local queue to be processed
 // asynchronously.
-func (q *InMemory) ScheduleFetch(ctx context.Context, modulePath, version, suffix string, taskIDChangeInterval time.Duration) (bool, error) {
+func (q *InMemory) ScheduleFetch(ctx context.Context, modulePath, version, _ string, _ bool) (bool, error) {
 	q.queue <- moduleVersion{modulePath, version}
 	return true, nil
 }

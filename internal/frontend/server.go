@@ -16,7 +16,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-redis/redis/v7"
+	"github.com/go-redis/redis/v8"
+	"github.com/google/safehtml"
 	"github.com/google/safehtml/template"
 	"golang.org/x/pkgsite/internal"
 	"golang.org/x/pkgsite/internal/derrors"
@@ -127,14 +128,20 @@ func (s *Server) Install(handle func(string, http.Handler), redisClient *redis.C
 	handle("/favicon.ico", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFile(w, r, fmt.Sprintf("%s/img/favicon.ico", http.Dir(s.staticPath.String())))
 	}))
+	handle("/mod/", http.HandlerFunc(s.handleModuleDetailsRedirect))
+	handle("/pkg/", http.HandlerFunc(s.handlePackageDetailsRedirect))
 	handle("/fetch/", fetchHandler)
 	handle("/play/", http.HandlerFunc(s.handlePlay))
-	handle("/pkg/", http.HandlerFunc(s.handlePackageDetailsRedirect))
 	handle("/search", searchHandler)
-	handle("/search-help", s.staticPageHandler("search_help.tmpl", "Search Help - go.dev"))
+	handle("/search-help", s.staticPageHandler("search_help.tmpl", "Search Help"))
 	handle("/license-policy", s.licensePolicyHandler())
 	handle("/about", http.RedirectHandler("https://go.dev/about", http.StatusFound))
 	handle("/badge/", http.HandlerFunc(s.badgeHandler))
+	handle("/C", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Package "C" is a special case: redirect to /cmd/cgo.
+		// (This is what golang.org/C does.)
+		http.Redirect(w, r, "/cmd/cgo", http.StatusMovedPermanently)
+	}))
 	handle("/", detailHandler)
 	if s.serveStats {
 		handle("/detail-stats/",
@@ -184,15 +191,12 @@ func detailsTTLForPath(ctx context.Context, urlPath, tab string) time.Duration {
 	if urlPath == "/" {
 		return defaultTTL
 	}
-	if strings.HasPrefix(urlPath, "/mod") {
-		urlPath = strings.TrimPrefix(urlPath, "/mod")
-	}
-	_, _, version, err := parseDetailsURLPath(urlPath)
+	info, err := parseDetailsURLPath(urlPath)
 	if err != nil {
 		log.Errorf(ctx, "falling back to default TTL: %v", err)
 		return defaultTTL
 	}
-	if version == internal.LatestVersion {
+	if info.requestedVersion == internal.LatestVersion {
 		return shortTTL
 	}
 	if tab == "importedby" || tab == "versions" {
@@ -208,9 +212,7 @@ func TagRoute(route string, r *http.Request) string {
 	if tab := r.FormValue("tab"); tab != "" {
 		// Verify that the tab value actually exists, otherwise this is unsanitized
 		// input and could result in unbounded cardinality in our metrics.
-		_, pkgOK := packageTabLookup[tab]
-		_, modOK := moduleTabLookup[tab]
-		if pkgOK || modOK {
+		if _, ok := unitTabLookup[tab]; ok {
 			if tag != "" {
 				tag += "-"
 			}
@@ -232,6 +234,9 @@ func (s *Server) staticPageHandler(templateName, title string) http.HandlerFunc 
 type basePage struct {
 	// HTMLTitle is the value to use in the page’s <title> tag.
 	HTMLTitle string
+
+	// MetaDescription is the html used for rendering the <meta name="Description"> tag.
+	MetaDescription safehtml.HTML
 
 	// Query is the current search query (if applicable).
 	Query string
@@ -477,6 +482,19 @@ func executeTemplate(ctx context.Context, templateName string, tmpl *template.Te
 	return buf.Bytes(), nil
 }
 
+var templateFuncs = template.FuncMap{
+	"add": func(i, j int) int { return i + j },
+	"pluralize": func(i int, s string) string {
+		if i == 1 {
+			return s
+		}
+		return s + "s"
+	},
+	"commaseparate": func(s []string) string {
+		return strings.Join(s, ", ")
+	},
+}
+
 // parsePageTemplates parses html templates contained in the given base
 // directory in order to generate a map of Name->*template.Template.
 //
@@ -499,30 +517,11 @@ func parsePageTemplates(base template.TrustedSource) (map[string]*template.Templ
 		{tsc("unit_imports.tmpl"), tsc("unit.tmpl")},
 		{tsc("unit_licenses.tmpl"), tsc("unit.tmpl")},
 		{tsc("unit_versions.tmpl"), tsc("unit.tmpl")},
-		{tsc("overview.tmpl"), tsc("details.tmpl")},
-		{tsc("subdirectories.tmpl"), tsc("details.tmpl")},
-		{tsc("pkg_doc.tmpl"), tsc("details.tmpl")},
-		{tsc("pkg_importedby.tmpl"), tsc("details.tmpl")},
-		{tsc("pkg_imports.tmpl"), tsc("details.tmpl")},
-		{tsc("licenses.tmpl"), tsc("details.tmpl")},
-		{tsc("versions.tmpl"), tsc("details.tmpl")},
-		{tsc("not_implemented.tmpl"), tsc("details.tmpl")},
 	}
 
 	templates := make(map[string]*template.Template)
 	for _, set := range htmlSets {
-		t, err := template.New("base.tmpl").Funcs(template.FuncMap{
-			"add": func(i, j int) int { return i + j },
-			"pluralize": func(i int, s string) string {
-				if i == 1 {
-					return s
-				}
-				return s + "s"
-			},
-			"commaseparate": func(s []string) string {
-				return strings.Join(s, ", ")
-			},
-		}).ParseFilesFromTrustedSources(join(base, tsc("base.tmpl")))
+		t, err := template.New("base.tmpl").Funcs(templateFuncs).ParseFilesFromTrustedSources(join(base, tsc("base.tmpl")))
 		if err != nil {
 			return nil, fmt.Errorf("ParseFiles: %v", err)
 		}

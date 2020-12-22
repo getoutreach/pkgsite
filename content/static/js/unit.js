@@ -6,9 +6,11 @@
  */
 
 import { AccordionController } from './accordion.js';
+import './toggle-tip.js';
 
 /**
  * Instantiates accordion controller for the left sidebar.
+ * Can be removed when readme-outline experiment is turned on.
  */
 const accordion = document.querySelector('.js-accordion');
 if (accordion) {
@@ -20,9 +22,13 @@ if (accordion) {
  */
 const readme = document.querySelector('.js-readme');
 const readmeContent = document.querySelector('.js-readmeContent');
+const readmeOutline = document.querySelector('.js-readmeOutline');
 const readmeExpand = document.querySelectorAll('.js-readmeExpand');
 const readmeCollapse = document.querySelector('.js-readmeCollapse');
-if (readme && readmeContent && readmeExpand.length && readmeCollapse) {
+if (readme && readmeContent && readmeOutline && readmeExpand.length && readmeCollapse) {
+  if (window.location.hash.includes('readme')) {
+    readme.classList.add('UnitReadme--expanded');
+  }
   readmeExpand.forEach(el =>
     el.addEventListener('click', e => {
       e.preventDefault();
@@ -38,22 +44,26 @@ if (readme && readmeContent && readmeExpand.length && readmeCollapse) {
   readmeContent.addEventListener('keyup', e => {
     readme.classList.add('UnitReadme--expanded');
   });
+  readmeContent.addEventListener('click', e => {
+    readme.classList.add('UnitReadme--expanded');
+  });
+  readmeOutline.addEventListener('click', e => {
+    readme.classList.add('UnitReadme--expanded');
+  });
+  document.addEventListener('keydown', e => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
+      readme.classList.add('UnitReadme--expanded');
+    }
+  });
 }
 
 /**
  * Disable unavailable sections in navigation dropdown on mobile.
  */
 const readmeOption = document.querySelector('.js-readmeOption');
-if (!readme) {
+if (readmeOption && !readme) {
   readmeOption.setAttribute('disabled', true);
 }
-
-const unitFiles = document.querySelector('.js-unitFiles');
-const filesOption = document.querySelector('.js-filesOption');
-if (!unitFiles) {
-  filesOption.setAttribute('disabled', true);
-}
-
 const unitDirectories = document.querySelector('.js-unitDirectories');
 const directoriesOption = document.querySelector('.js-directoriesOption');
 if (!unitDirectories) {

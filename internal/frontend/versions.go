@@ -80,23 +80,7 @@ func fetchVersionsDetails(ctx context.Context, ds internal.DataSource, fullPath,
 		} else {
 			versionPath = pathInVersion(internal.V1Path(fullPath, modulePath), mi)
 		}
-		return constructPackageURL(versionPath, mi.ModulePath, linkVersion(mi.Version, mi.ModulePath))
-	}
-	return buildVersionDetails(modulePath, versions, linkify), nil
-}
-
-func fetchModuleVersionsDetails(ctx context.Context, ds internal.DataSource, modulePath string) (*VersionsDetails, error) {
-	db, ok := ds.(*postgres.DB)
-	if !ok {
-		// The proxydatasource does not support the imported by page.
-		return nil, proxydatasourceNotSupportedErr()
-	}
-	versions, err := db.GetVersionsForPath(ctx, modulePath)
-	if err != nil {
-		return nil, err
-	}
-	linkify := func(m *internal.ModuleInfo) string {
-		return constructModuleURL(m.ModulePath, linkVersion(m.Version, m.ModulePath))
+		return constructUnitURL(versionPath, mi.ModulePath, linkVersion(mi.Version, mi.ModulePath))
 	}
 	return buildVersionDetails(modulePath, versions, linkify), nil
 }

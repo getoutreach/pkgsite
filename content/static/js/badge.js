@@ -22,9 +22,12 @@ if (pathEl && htmlEl && markdownEl && badgeEl) {
   pathEl.addEventListener('input', e => {
     const origin = window.location.origin;
     const href = `${origin}/${e.target.value}`;
-    const imgSrc = `${origin}/badge/${e.target.value}`;
-    htmlEl.value = `<a href="${href}"><img src="${imgSrc}" alt="PkgGoDev"></a>`;
-    markdownEl.value = `[![PkgGoDev](${imgSrc})](${href})`;
+    var imgSrc = `${origin}/badge/${e.target.value}`;
+    if (e.target.value) {
+      imgSrc = imgSrc + '.svg';
+    }
+    htmlEl.value = `<a href="${href}"><img src="${imgSrc}" alt="Go Reference"></a>`;
+    markdownEl.value = `[![Go Reference](${imgSrc})](${href})`;
     badgeEl.href = href;
   });
 }

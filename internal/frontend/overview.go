@@ -23,81 +23,10 @@ import (
 	"golang.org/x/net/html/atom"
 	"golang.org/x/pkgsite/internal"
 	"golang.org/x/pkgsite/internal/derrors"
-	"golang.org/x/pkgsite/internal/experiment"
 	"golang.org/x/pkgsite/internal/source"
 )
 
-// OverviewDetails contains all of the data that the readme template
-// needs to populate.
-type OverviewDetails struct {
-	ModulePath       string
-	ModuleURL        string
-	PackageSourceURL string
-	ReadMe           safehtml.HTML
-	ReadMeSource     string
-	Redistributable  bool
-	RepositoryURL    string
-}
-
-// fetchOverviewDetails uses the given version to fetch an OverviewDetails.
-// versionedLinks says whether the constructed URLs should have versions.
-func fetchOverviewDetails(ctx context.Context, ds internal.DataSource, um *internal.UnitMeta, versionedLinks bool) (*OverviewDetails, error) {
-	u, err := ds.GetUnit(ctx, um, internal.WithReadme)
-	if err != nil {
-		return nil, err
-	}
-	var readme *internal.Readme
-	if u.Readme != nil {
-		readme = &internal.Readme{Filepath: u.Readme.Filepath, Contents: u.Readme.Contents}
-	}
-	mi := &internal.ModuleInfo{
-		ModulePath:        um.ModulePath,
-		Version:           um.Version,
-		CommitTime:        um.CommitTime,
-		IsRedistributable: um.IsRedistributable,
-		SourceInfo:        u.SourceInfo,
-	}
-	return constructOverviewDetails(ctx, mi, readme, u.IsRedistributable, versionedLinks)
-}
-
-// constructOverviewDetails uses the given module version and readme to
-// construct an OverviewDetails. versionedLinks says whether the constructed URLs should have versions.
-func constructOverviewDetails(ctx context.Context, mi *internal.ModuleInfo, readme *internal.Readme, isRedistributable bool, versionedLinks bool) (*OverviewDetails, error) {
-	var lv string
-	if versionedLinks {
-		lv = linkVersion(mi.Version, mi.ModulePath)
-	} else {
-		lv = internal.LatestVersion
-	}
-	overview := &OverviewDetails{
-		ModulePath:      mi.ModulePath,
-		ModuleURL:       constructModuleURL(mi.ModulePath, lv),
-		RepositoryURL:   mi.SourceInfo.RepoURL(),
-		Redistributable: isRedistributable,
-	}
-	if overview.Redistributable && readme != nil {
-		overview.ReadMeSource = fileSource(mi.ModulePath, mi.Version, readme.Filepath)
-		r, err := LegacyReadmeHTML(ctx, mi, readme)
-		if err != nil {
-			return nil, err
-		}
-		overview.ReadMe = r
-	}
-	return overview, nil
-}
-
-// fetchPackageOverviewDetails uses data for the given versioned directory to return an OverviewDetails.
-func fetchPackageOverviewDetails(ctx context.Context, ds internal.DataSource, um *internal.UnitMeta, versionedLinks bool) (*OverviewDetails, error) {
-	od, err := fetchOverviewDetails(ctx, ds, um, versionedLinks)
-	if err != nil {
-		return nil, err
-	}
-	od.RepositoryURL = um.SourceInfo.RepoURL()
-	od.PackageSourceURL = um.SourceInfo.DirectoryURL(internal.Suffix(um.Path, um.ModulePath))
-	return od, nil
-}
-
-func blackfridayReadmeHTML(ctx context.Context, readme *internal.Readme, mi *internal.ModuleInfo) (safehtml.HTML, error) {
+func blackfridayReadmeHTML(readme *internal.Readme, mi *internal.ModuleInfo) (safehtml.HTML, error) {
 	// blackfriday.Run() uses CommonHTMLFlags and CommonExtensions by default.
 	renderer := blackfriday.NewHTMLRenderer(blackfriday.HTMLRendererParameters{Flags: blackfriday.CommonHTMLFlags})
 	parser := blackfriday.New(blackfriday.WithExtensions(blackfriday.CommonExtensions | blackfriday.AutoHeadingIDs))
@@ -111,7 +40,7 @@ func blackfridayReadmeHTML(ctx context.Context, readme *internal.Readme, mi *int
 	rootNode.Walk(func(node *blackfriday.Node, entering bool) blackfriday.WalkStatus {
 		switch node.Type {
 		case blackfriday.Heading:
-			if experiment.IsActive(ctx, internal.ExperimentUnitPage) && node.HeadingID != "" {
+			if node.HeadingID != "" {
 				// Prefix HeadingID with "readme-" on the unit page to prevent
 				// a namespace clash with the documentation section.
 				node.HeadingID = "readme-" + node.HeadingID
@@ -157,7 +86,7 @@ func LegacyReadmeHTML(ctx context.Context, mi *internal.ModuleInfo, readme *inte
 		return h, nil
 	}
 
-	return blackfridayReadmeHTML(ctx, readme, mi)
+	return blackfridayReadmeHTML(readme, mi)
 }
 
 // legacySanitizeHTML reads HTML from r and sanitizes it to ensure it is safe.

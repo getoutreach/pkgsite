@@ -92,7 +92,6 @@ var (
 		HasGoMod:          true,
 	}
 	cmpOpts = append([]cmp.Option{
-		cmpopts.IgnoreFields(internal.Documentation{}, "HTML"),
 		cmpopts.IgnoreFields(licenses.License{}, "Contents"),
 	}, sample.LicenseCmpOpts...)
 )
@@ -213,6 +212,13 @@ func TestDataSource_GetLatestMajorVersion(t *testing.T) {
 		{
 			ModulePath: "bar.com/foo",
 		},
+		{
+			ModulePath: "incompatible.com/bar",
+			Version:    "v2.1.1+incompatible",
+		},
+		{
+			ModulePath: "incompatible.com/bar/v3",
+		},
 	}
 	client, teardownProxy := proxy.SetupTestClient(t, testModules)
 	defer teardownProxy()
@@ -221,24 +227,43 @@ func TestDataSource_GetLatestMajorVersion(t *testing.T) {
 	ds := New(client)
 
 	for _, test := range []struct {
-		seriesPath  string
-		wantVersion string
-		wantErr     error
+		fullPath        string
+		modulePath      string
+		wantModulePath  string
+		wantPackagePath string
+		wantErr         error
 	}{
 		{
-			seriesPath:  "foo.com/bar",
-			wantVersion: "/v3",
+			fullPath:        "foo.com/bar",
+			modulePath:      "foo.com/bar",
+			wantModulePath:  "foo.com/bar/v3",
+			wantPackagePath: "foo.com/bar/v3",
 		},
 		{
-			seriesPath:  "bar.com/foo",
-			wantVersion: "",
+			fullPath:        "bar.com/foo",
+			modulePath:      "bar.com/foo",
+			wantModulePath:  "bar.com/foo",
+			wantPackagePath: "bar.com/foo",
 		},
 		{
-			seriesPath: "boo.com/far",
+			fullPath:   "boo.com/far",
+			modulePath: "boo.com/far",
 			wantErr:    derrors.NotFound,
 		},
+		{
+			fullPath:        "foo.com/bar/baz",
+			modulePath:      "foo.com/bar",
+			wantModulePath:  "foo.com/bar/v3",
+			wantPackagePath: "foo.com/bar/v3",
+		},
+		{
+			fullPath:        "incompatible.com/bar",
+			modulePath:      "incompatible.com/bar",
+			wantModulePath:  "incompatible.com/bar/v3",
+			wantPackagePath: "incompatible.com/bar/v3",
+		},
 	} {
-		gotVersion, err := ds.GetLatestMajorVersion(ctx, test.seriesPath)
+		gotVersion, gotPath, err := ds.GetLatestMajorVersion(ctx, test.fullPath, test.modulePath)
 		if err != nil {
 			if test.wantErr == nil {
 				t.Fatalf("got unexpected error %v", err)
@@ -247,8 +272,8 @@ func TestDataSource_GetLatestMajorVersion(t *testing.T) {
 				t.Errorf("got err = %v, want Is(%v)", err, test.wantErr)
 			}
 		}
-		if gotVersion != test.wantVersion {
-			t.Errorf("GetLatestMajorVersion(%v) = %v, want %v", test.seriesPath, gotVersion, test.wantVersion)
+		if gotVersion != test.wantModulePath || gotPath != test.wantPackagePath {
+			t.Errorf("ds.GetLatestMajorVersion(%v, %v) = (%v, %v), want = (%v, %v)", test.fullPath, test.modulePath, gotVersion, gotPath, test.wantModulePath, test.wantPackagePath)
 		}
 	}
 }

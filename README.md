@@ -1,5 +1,7 @@
 # Pkg.go.dev
 
+[![Go Reference](https://pkg.go.dev/badge/golang.org/x/pkgsite.svg)](https://pkg.go.dev/golang.org/x/pkgsite)
+
 ## A site for discovering Go packages
 
 Pkg.go.dev is a website for discovering and evaluating Go packages and modules.
@@ -67,3 +69,9 @@ To contribute, please read our [contributing guide](CONTRIBUTING.md).
 
 Unless otherwise noted, the Go source files are distributed under the BSD-style
 license found in the [LICENSE](LICENSE) file.
+
+## Links
+
+- [Homepage](https://pkg.go.dev)
+- [Feedback](https://golang.org/s/pkgsite-feedback)
+- [Issue Tracker](https://golang.org/s/pkgsite-issues)

@@ -10,7 +10,7 @@ import (
 	"fmt"
 	"strings"
 
-	"golang.org/x/mod/module"
+	"github.com/Masterminds/squirrel"
 	"golang.org/x/pkgsite/internal"
 	"golang.org/x/pkgsite/internal/derrors"
 	"golang.org/x/pkgsite/internal/version"
@@ -51,20 +51,20 @@ func getPathVersions(ctx context.Context, db *DB, path string, versionTypes ...v
 		m.has_go_mod,
 		m.source_info
 	FROM modules m
-	INNER JOIN units p
-		ON p.module_id = m.id
+	INNER JOIN units u
+		ON u.module_id = m.id
 	LEFT JOIN documentation d
-		ON d.unit_id = p.id
+		ON d.unit_id = u.id
 	WHERE
-		p.v1_path = (
-			SELECT p2.v1_path
-			FROM units as p2
-			WHERE p2.path = $1
+		u.v1_path = (
+			SELECT u2.v1_path
+			FROM units as u2
+			WHERE u2.path = $1
 			LIMIT 1
 		)
 		AND version_type in (%s)
 		-- Packages must have documentation source
-		AND (p.name = '' OR d.source IS NOT NULL)
+		AND (u.name = '' OR d.source IS NOT NULL)
 	ORDER BY
 		m.incompatible,
 		m.module_path DESC,
@@ -102,31 +102,43 @@ func versionTypeExpr(vts []version.Type) string {
 	return strings.Join(vs, ", ")
 }
 
-// GetLatestMajorVersion returns the latest major version string of a module
-// path. For example, in the module path "github.com/casbin/casbin", there
-// is another path with a greater major version
-// "github.com/casbin/casbin/v3". This function will return "/v3" or an
-// empty string if there is no major version string at the end.
-func (db *DB) GetLatestMajorVersion(ctx context.Context, seriesPath string) (_ string, err error) {
-	defer derrors.Wrap(&err, "DB.GetLatestMajorVersion(ctx, %q)", seriesPath)
+// GetLatestMajorVersion returns the latest module path and the full package path
+// of the latest version found, given the fullPath and the modulePath.
+// For example, in the module path "github.com/casbin/casbin", there
+// is another module path with a greater major version "github.com/casbin/casbin/v3".
+// This function will return "github.com/casbin/casbin/v3" or the input module path
+// if no later module path was found. It also returns the full package path at the
+// latest module version if it exists. If not, it returns the module path.
+func (db *DB) GetLatestMajorVersion(ctx context.Context, fullPath, modulePath string) (_ string, _ string, err error) {
+	defer derrors.Wrap(&err, "DB.GetLatestMajorVersion(ctx, %q, %q)", fullPath, modulePath)
 
-	var latestPath string
-	latestModulePathQuery := fmt.Sprintf(`
-		SELECT
-			m.module_path
-		FROM
-			modules m
-		WHERE
-			m.series_path = $1
-		%s
-		LIMIT 1;`, orderByLatest)
-	row := db.db.QueryRow(ctx, latestModulePathQuery, seriesPath)
-	if err := row.Scan(&latestPath); err != nil {
-		return "", err
+	var (
+		modID   int
+		modPath string
+	)
+	seriesPath := internal.SeriesPathForModule(modulePath)
+	q, args, err := orderByLatest(squirrel.Select("m.module_path", "m.id").
+		From("modules m").
+		Where(squirrel.Eq{"m.series_path": seriesPath})).
+		Limit(1).
+		ToSql()
+	if err != nil {
+		return "", "", err
 	}
-	_, majorPath, ok := module.SplitPathVersion(latestPath)
-	if !ok {
-		return "", fmt.Errorf("module.SplitPathVersion(%q): %v", latestPath, majorPath)
+	row := db.db.QueryRow(ctx, q, args...)
+	if err := row.Scan(&modPath, &modID); err != nil {
+		return "", "", err
 	}
-	return majorPath, nil
+
+	v1Path := internal.V1Path(fullPath, modulePath)
+	row = db.db.QueryRow(ctx, `SELECT path FROM units WHERE v1_path = $1 AND module_id = $2;`, v1Path, modID)
+	var path string
+	switch row.Scan(&path) {
+	case nil:
+		return modPath, path, nil
+	case sql.ErrNoRows:
+		return modPath, modPath, nil
+	default:
+		return "", "", err
+	}
 }

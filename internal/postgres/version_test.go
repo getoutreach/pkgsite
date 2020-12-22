@@ -212,20 +212,20 @@ func TestGetVersions(t *testing.T) {
 		},
 	}
 
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
+	for _, test := range testCases {
+		t.Run(test.name, func(t *testing.T) {
 			var want []*internal.ModuleInfo
-			for _, w := range tc.want {
+			for _, w := range test.want {
 				mod := sample.ModuleInfo(w.ModulePath, w.Version)
 				want = append(want, mod)
 			}
 
-			got, err := testDB.GetVersionsForPath(ctx, tc.path)
+			got, err := testDB.GetVersionsForPath(ctx, test.path)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if diff := cmp.Diff(want, got, cmp.AllowUnexported(source.Info{})); diff != "" {
-				t.Errorf("testDB.GetVersionsForPath(%q) mismatch (-want +got):\n%s", tc.path, diff)
+				t.Errorf("testDB.GetVersionsForPath(%q) mismatch (-want +got):\n%s", test.path, diff)
 			}
 		})
 	}
@@ -236,47 +236,65 @@ func TestGetLatestMajorVersion(t *testing.T) {
 	defer cancel()
 
 	defer ResetTestDB(testDB, t)
-	for _, modulePath := range []string{
-		"foo.com/bar",
-		"foo.com/bar/v2",
-		"foo.com/bar/v3",
-		"bar.com/foo",
+	for _, m := range []*internal.Module{
+		sample.Module("foo.com/bar", "v1.1.1", "baz", "faz"),
+		sample.Module("foo.com/bar/v2", "v2.0.5", "baz", "faz"),
+		sample.Module("foo.com/bar/v3", "v3.0.1", "baz"),
+		sample.Module("bar.com/foo", sample.VersionString, sample.Suffix),
 	} {
-		m := sample.Module(modulePath, sample.VersionString, sample.Suffix)
 		if err := testDB.InsertModule(ctx, m); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	for _, tc := range []struct {
-		seriesPath  string
-		wantVersion string
-		wantErr     error
+	for _, test := range []struct {
+		fullPath        string
+		modulePath      string
+		wantModulePath  string
+		wantPackagePath string
+		wantErr         error
 	}{
 		{
-			seriesPath:  "foo.com/bar",
-			wantVersion: "/v3",
+			fullPath:        "foo.com/bar",
+			modulePath:      "foo.com/bar",
+			wantModulePath:  "foo.com/bar/v3",
+			wantPackagePath: "foo.com/bar/v3",
 		},
 		{
-			seriesPath:  "bar.com/foo",
-			wantVersion: "",
+			fullPath:        "bar.com/foo",
+			modulePath:      "bar.com/foo",
+			wantModulePath:  "bar.com/foo",
+			wantPackagePath: "bar.com/foo",
 		},
 		{
-			seriesPath: "boo.com/far",
+			fullPath:   "boo.com/far",
+			modulePath: "boo.com/far",
 			wantErr:    sql.ErrNoRows,
 		},
+		{
+			fullPath:        "foo.com/bar/baz",
+			modulePath:      "foo.com/bar",
+			wantModulePath:  "foo.com/bar/v3",
+			wantPackagePath: "foo.com/bar/v3/baz",
+		},
+		{
+			fullPath:        "foo.com/bar/faz",
+			modulePath:      "foo.com/bar",
+			wantModulePath:  "foo.com/bar/v3",
+			wantPackagePath: "foo.com/bar/v3",
+		},
 	} {
-		gotVersion, err := testDB.GetLatestMajorVersion(ctx, tc.seriesPath)
+		gotVersion, gotPath, err := testDB.GetLatestMajorVersion(ctx, test.fullPath, test.modulePath)
 		if err != nil {
-			if tc.wantErr == nil {
+			if test.wantErr == nil {
 				t.Fatalf("got unexpected error %v", err)
 			}
-			if !errors.Is(err, tc.wantErr) {
-				t.Errorf("got err = %v, want Is(%v)", err, tc.wantErr)
+			if !errors.Is(err, test.wantErr) {
+				t.Errorf("got err = %v, want Is(%v)", err, test.wantErr)
 			}
 		}
-		if gotVersion != tc.wantVersion {
-			t.Errorf("testDB.GetLatestMajorVersion(%v) = %v, want = %v", tc.seriesPath, gotVersion, tc.wantVersion)
+		if gotVersion != test.wantModulePath || gotPath != test.wantPackagePath {
+			t.Errorf("testDB.GetLatestMajorVersion(%v, %v) = (%v, %v), want = (%v, %v)", test.fullPath, test.modulePath, gotVersion, gotPath, test.wantModulePath, test.wantPackagePath)
 		}
 	}
 }

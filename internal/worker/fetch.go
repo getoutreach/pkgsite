@@ -35,12 +35,19 @@ type fetchTask struct {
 	timings map[string]time.Duration
 }
 
+// A Fetcher holds state for fetching modules.
+type Fetcher struct {
+	ProxyClient  *proxy.Client
+	SourceClient *source.Client
+	DB           *postgres.DB
+}
+
 // FetchAndUpdateState fetches and processes a module version, and then updates
 // the module_version_states table according to the result. It returns an HTTP
 // status code representing the result of the fetch operation, and a non-nil
 // error if this status code is not 200.
-func FetchAndUpdateState(ctx context.Context, modulePath, requestedVersion string, proxyClient *proxy.Client, sourceClient *source.Client, db *postgres.DB, appVersionLabel string) (_ int, err error) {
-	defer derrors.Wrap(&err, "FetchAndUpdateState(%q, %q)", modulePath, requestedVersion)
+func (f *Fetcher) FetchAndUpdateState(ctx context.Context, modulePath, requestedVersion, appVersionLabel string, disableProxyFetch bool) (_ int, resolvedVersion string, err error) {
+	defer derrors.Wrap(&err, "FetchAndUpdateState(%q, %q, %q, %t)", modulePath, requestedVersion, appVersionLabel, disableProxyFetch)
 
 	tctx, span := trace.StartSpan(ctx, "FetchAndUpdateState")
 	ctx = experiment.NewContext(tctx, experiment.FromContext(ctx).Active()...)
@@ -56,14 +63,14 @@ func FetchAndUpdateState(ctx context.Context, modulePath, requestedVersion strin
 		trace.StringAttribute("version", requestedVersion))
 	defer span.End()
 
-	ft := fetchAndInsertModule(ctx, modulePath, requestedVersion, proxyClient, sourceClient, db)
+	ft := f.fetchAndInsertModule(ctx, modulePath, requestedVersion, disableProxyFetch)
 	span.AddAttributes(trace.Int64Attribute("numPackages", int64(len(ft.PackageVersionStates))))
 
 	// If there were any errors processing the module then we didn't insert it.
 	// Delete it in case we are reprocessing an existing module.
 	// However, don't delete if the error was internal, or we are shedding load.
 	if ft.Status >= 400 && ft.Status < 500 {
-		if err := deleteModule(ctx, db, ft); err != nil {
+		if err := deleteModule(ctx, f.DB, ft); err != nil {
 			log.Error(ctx, err)
 			ft.Error = err
 			ft.Status = http.StatusInternalServerError
@@ -73,7 +80,7 @@ func FetchAndUpdateState(ctx context.Context, modulePath, requestedVersion strin
 	}
 	// Regardless of what the status code is, insert the result into
 	// version_map, so that a response can be returned for frontend_fetch.
-	if err := updateVersionMap(ctx, db, ft); err != nil {
+	if err := updateVersionMap(ctx, f.DB, ft); err != nil {
 		log.Error(ctx, err)
 		if ft.Status != http.StatusInternalServerError {
 			ft.Error = err
@@ -88,7 +95,7 @@ func FetchAndUpdateState(ctx context.Context, modulePath, requestedVersion strin
 		// resolvedVersion. This fetch request does not need to be recorded in
 		// module_version_states, since that table is only used to track
 		// modules that have been published to index.golang.org.
-		return ft.Status, ft.Error
+		return ft.Status, ft.ResolvedVersion, ft.Error
 	}
 
 	// Update the module_version_states table with the new status of
@@ -98,7 +105,7 @@ func FetchAndUpdateState(ctx context.Context, modulePath, requestedVersion strin
 	// TODO(golang/go#39628): Split UpsertModuleVersionState into
 	// InsertModuleVersionState and UpdateModuleVersionState.
 	start := time.Now()
-	err = db.UpsertModuleVersionState(ctx, ft.ModulePath, ft.ResolvedVersion, appVersionLabel,
+	err = f.DB.UpsertModuleVersionState(ctx, ft.ModulePath, ft.ResolvedVersion, appVersionLabel,
 		time.Time{}, ft.Status, ft.GoModPath, ft.Error, ft.PackageVersionStates)
 	ft.timings["db.UpsertModuleVersionState"] = time.Since(start)
 	if err != nil {
@@ -108,10 +115,10 @@ func FetchAndUpdateState(ctx context.Context, modulePath, requestedVersion strin
 			ft.Error = fmt.Errorf("db.UpsertModuleVersionState: %v, original error: %v", err, ft.Error)
 		}
 		logTaskResult(ctx, ft, "Failed to update module version state")
-		return http.StatusInternalServerError, ft.Error
+		return http.StatusInternalServerError, ft.ResolvedVersion, ft.Error
 	}
 	logTaskResult(ctx, ft, "Updated module version state")
-	return ft.Status, ft.Error
+	return ft.Status, ft.ResolvedVersion, ft.Error
 }
 
 // fetchAndInsertModule fetches the given module version from the module proxy
@@ -121,7 +128,7 @@ func FetchAndUpdateState(ctx context.Context, modulePath, requestedVersion strin
 // The given parentCtx is used for tracing, but fetches actually execute in a
 // detached context with fixed timeout, so that fetches are allowed to complete
 // even for short-lived requests.
-func fetchAndInsertModule(ctx context.Context, modulePath, requestedVersion string, proxyClient *proxy.Client, sourceClient *source.Client, db *postgres.DB) *fetchTask {
+func (f *Fetcher) fetchAndInsertModule(ctx context.Context, modulePath, requestedVersion string, disableProxyFetch bool) *fetchTask {
 	ft := &fetchTask{
 		FetchResult: fetch.FetchResult{
 			ModulePath:       modulePath,
@@ -143,7 +150,7 @@ func fetchAndInsertModule(ctx context.Context, modulePath, requestedVersion stri
 		return ft
 	}
 
-	exc, err := db.IsExcluded(ctx, modulePath)
+	exc, err := f.DB.IsExcluded(ctx, modulePath)
 	if err != nil {
 		ft.Error = err
 		return ft
@@ -154,7 +161,7 @@ func fetchAndInsertModule(ctx context.Context, modulePath, requestedVersion stri
 	}
 
 	start := time.Now()
-	fr := fetch.FetchModule(ctx, modulePath, requestedVersion, proxyClient, sourceClient)
+	fr := fetch.FetchModule(ctx, modulePath, requestedVersion, f.ProxyClient, f.SourceClient, disableProxyFetch)
 	if fr == nil {
 		panic("fetch.FetchModule should never return a nil FetchResult")
 	}
@@ -174,7 +181,7 @@ func fetchAndInsertModule(ctx context.Context, modulePath, requestedVersion stri
 	log.Infof(ctx, "fetch.FetchVersion succeeded for %s@%s", ft.ModulePath, ft.RequestedVersion)
 
 	start = time.Now()
-	err = db.InsertModule(ctx, ft.Module)
+	err = f.DB.InsertModule(ctx, ft.Module)
 	ft.timings["db.InsertModule"] = time.Since(start)
 	if err != nil {
 		log.Error(ctx, err)

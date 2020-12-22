@@ -10,6 +10,7 @@ package config
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -123,10 +124,6 @@ type Config struct {
 	// is running as when on GCP.
 	ServiceAccount string
 
-	// QueueService is the AppEngine service that the Cloud Tasks queue should
-	// send requests to.
-	QueueService string
-
 	// QueueURL is the URL that the Cloud Tasks queue should send requests to.
 	// It should be used when the worker is not on AppEngine.
 	QueueURL string
@@ -156,6 +153,7 @@ type Config struct {
 	DBSecret, DBUser, DBHost, DBPort, DBName string
 	DBSecondaryHost                          string // DB host to use if first one is down
 	DBPassword                               string `json:"-"`
+	DBDriver                                 string
 
 	// Configuration for redis page cache.
 	RedisCacheHost, RedisCachePort string
@@ -224,10 +222,6 @@ const StatementTimeout = 10 * time.Minute
 // SourceTimeout is the value of the timeout for source.Client, which is used
 // to fetch source code from third party URLs.
 const SourceTimeout = 1 * time.Minute
-
-// TaskIDChangeIntervalWorker is the time period during which a given module
-// version can be re-enqueued to fetch tasks.
-const TaskIDChangeIntervalWorker = 3 * time.Hour
 
 // TaskIDChangeIntervalFrontend is the time period during which a given module
 // version can be re-enqueued to frontend tasks.
@@ -309,8 +303,6 @@ func (c *Config) Application() string {
 	switch svc {
 	case "default":
 		return "frontend"
-	case "etl":
-		return "worker"
 	default:
 		return svc
 	}
@@ -326,6 +318,7 @@ type configOverride struct {
 
 // QuotaSettings is config for internal/middleware/quota.go
 type QuotaSettings struct {
+	Enable     bool
 	QPS        int // allowed queries per second, per IP block
 	Burst      int // maximum requests per second, per block; the size of the token bucket
 	MaxEntries int // maximum number of entries to keep track of
@@ -335,6 +328,7 @@ type QuotaSettings struct {
 	// AuthValues is the set of values that could be set on the AuthHeader, in
 	// order to bypass checks by the quota server.
 	AuthValues []string
+	HMACKey    []byte `json:"-"` // key for obfuscating IPs
 }
 
 // TeeproxySettings contains the configuration values for the teeproxy. See
@@ -371,7 +365,6 @@ func Init(ctx context.Context) (_ *Config, err error) {
 		VersionID:          GetEnv("GAE_VERSION", os.Getenv("DOCKER_IMAGE")),
 		InstanceID:         GetEnv("GAE_INSTANCE", os.Getenv("GO_DISCOVERY_INSTANCE")),
 		GoogleTagManagerID: os.Getenv("GO_DISCOVERY_GOOGLE_TAG_MANAGER_ID"),
-		QueueService:       os.Getenv("GO_DISCOVERY_QUEUE_SERVICE"),
 		QueueURL:           os.Getenv("GO_DISCOVERY_QUEUE_URL"),
 		QueueAudience:      os.Getenv("GO_DISCOVERY_QUEUE_AUDIENCE"),
 
@@ -388,18 +381,23 @@ func Init(ctx context.Context) (_ *Config, err error) {
 		DBPort:               GetEnv("GO_DISCOVERY_DATABASE_PORT", "5432"),
 		DBName:               GetEnv("GO_DISCOVERY_DATABASE_NAME", "discovery-db"),
 		DBSecret:             os.Getenv("GO_DISCOVERY_DATABASE_SECRET"),
+		DBDriver:             GetEnv("GO_DISCOVERY_DATABASE_DRIVER", "postgres"),
 		RedisCacheHost:       os.Getenv("GO_DISCOVERY_REDIS_HOST"),
 		RedisCachePort:       GetEnv("GO_DISCOVERY_REDIS_PORT", "6379"),
 		RedisHAHost:          os.Getenv("GO_DISCOVERY_REDIS_HA_HOST"),
 		RedisHAPort:          GetEnv("GO_DISCOVERY_REDIS_HA_PORT", "6379"),
 		Quota: QuotaSettings{
-			QPS:        10,
-			Burst:      20,
-			MaxEntries: 1000,
-			RecordOnly: func() *bool { t := true; return &t }(),
+			Enable:     os.Getenv("GO_DISCOVERY_ENABLE_QUOTA") == "true",
+			QPS:        GetEnvInt("GO_DISCOVERY_QUOTA_QPS", 10),
+			Burst:      20,   // ignored in redis-based quota implementation
+			MaxEntries: 1000, // ignored in redis-based quota implementation
+			RecordOnly: func() *bool {
+				t := (os.Getenv("GO_DISCOVERY_QUOTA_RECORD_ONLY") != "false")
+				return &t
+			}(),
 			AuthValues: parseCommaList(os.Getenv("GO_DISCOVERY_AUTH_VALUES")),
 		},
-		UseProfiler: os.Getenv("GO_DISCOVERY_USE_PROFILER") == "TRUE",
+		UseProfiler: os.Getenv("GO_DISCOVERY_USE_PROFILER") == "true",
 		Teeproxy: TeeproxySettings{
 			AuthKey:          BypassQuotaAuthHeader,
 			AuthValue:        os.Getenv("GO_DISCOVERY_TEEPROXY_AUTH_VALUE"),
@@ -483,6 +481,22 @@ func Init(ctx context.Context) (_ *Config, err error) {
 		if err != nil {
 			return nil, fmt.Errorf("could not get database password secret: %v", err)
 		}
+	}
+	if cfg.Quota.Enable {
+		s, err := secrets.Get(ctx, "quota-hmac-key")
+		if err != nil {
+			return nil, err
+		}
+		hmacKey, err := hex.DecodeString(s)
+		if err != nil {
+			return nil, err
+		}
+		if len(hmacKey) < 16 {
+			return nil, errors.New("HMAC secret must be at least 16 bytes")
+		}
+		cfg.Quota.HMACKey = hmacKey
+	} else {
+		log.Print("quota enforcement disabled")
 	}
 
 	// If GO_DISCOVERY_CONFIG_OVERRIDE is set, it should point to a file in a

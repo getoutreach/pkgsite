@@ -13,8 +13,8 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
-	"github.com/google/safehtml/testconversions"
 	"golang.org/x/pkgsite/internal"
+	"golang.org/x/pkgsite/internal/godoc"
 	"golang.org/x/pkgsite/internal/licenses"
 	"golang.org/x/pkgsite/internal/postgres"
 	"golang.org/x/pkgsite/internal/proxy"
@@ -53,13 +53,9 @@ var buildConstraintsMod = &proxy.Module{
 	},
 }
 
-var html = testconversions.MakeHTMLForTest
-
 func TestFetchAndUpdateState(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
-
-	const goRepositoryURLPrefix = "https://github.com/golang"
 
 	stdlib.UseTestData = true
 	defer func() { stdlib.UseTestData = false }()
@@ -69,10 +65,10 @@ func TestFetchAndUpdateState(t *testing.T) {
 		{
 			ModulePath: "github.com/my/module",
 			Files: map[string]string{
-				"go.mod":      "module github.com/my/module\n\ngo 1.12",
-				"LICENSE":     testhelper.BSD0License,
-				"README.md":   "README FILE FOR TESTING.",
-				"bar/LICENSE": testhelper.MITLicense,
+				"go.mod":        "module github.com/my/module\n\ngo 1.12",
+				"LICENSE":       testhelper.BSD0License,
+				"bar/README.md": "README FILE FOR TESTING.",
+				"bar/LICENSE":   testhelper.MITLicense,
 				"bar/bar.go": `
 					// package bar
 					package bar
@@ -147,6 +143,7 @@ func TestFetchAndUpdateState(t *testing.T) {
 	myModuleV100 := &internal.Unit{
 		UnitMeta: internal.UnitMeta{
 			ModulePath:        "github.com/my/module",
+			HasGoMod:          true,
 			Version:           sample.VersionString,
 			CommitTime:        testProxyCommitTime,
 			SourceInfo:        source.NewGitHubInfo("https://github.com/my/module", "", sample.VersionString),
@@ -160,12 +157,11 @@ func TestFetchAndUpdateState(t *testing.T) {
 		},
 		Documentation: &internal.Documentation{
 			Synopsis: "package bar",
-			HTML:     html("Bar returns the string &#34;bar&#34;."),
 			GOOS:     "linux",
 			GOARCH:   "amd64",
 		},
 		Readme: &internal.Readme{
-			Filepath: "README.md",
+			Filepath: "bar/README.md",
 			Contents: "README FILE FOR TESTING.",
 		},
 	}
@@ -175,7 +171,7 @@ func TestFetchAndUpdateState(t *testing.T) {
 		version     string
 		pkg         string
 		want        *internal.Unit
-		moreWantDoc []string // Additional substrings we expect to see in DocumentationHTML.
+		wantDoc     []string // Substrings we expect to see in DocumentationHTML.
 		dontWantDoc []string // Substrings we expect not to see in DocumentationHTML.
 	}{
 		{
@@ -183,6 +179,7 @@ func TestFetchAndUpdateState(t *testing.T) {
 			version:    sample.VersionString,
 			pkg:        "github.com/my/module/bar",
 			want:       myModuleV100,
+			wantDoc:    []string{"Bar returns the string &#34;bar&#34;."},
 		},
 		{
 			modulePath: "github.com/my/module",
@@ -200,6 +197,7 @@ func TestFetchAndUpdateState(t *testing.T) {
 				UnitMeta: internal.UnitMeta{
 					ModulePath:        "nonredistributable.mod/module",
 					Version:           "v1.0.0",
+					HasGoMod:          true,
 					CommitTime:        testProxyCommitTime,
 					SourceInfo:        nil,
 					IsRedistributable: true,
@@ -213,15 +211,11 @@ func TestFetchAndUpdateState(t *testing.T) {
 				},
 				Documentation: &internal.Documentation{
 					Synopsis: "package baz",
-					HTML:     html("Baz returns the string &#34;baz&#34;."),
 					GOOS:     "linux",
 					GOARCH:   "amd64",
 				},
-				Readme: &internal.Readme{
-					Filepath: "README.md",
-					Contents: "README FILE FOR TESTING.",
-				},
 			},
+			wantDoc: []string{"Baz returns the string &#34;baz&#34;."},
 		}, {
 			modulePath: "nonredistributable.mod/module",
 			version:    sample.VersionString,
@@ -230,6 +224,7 @@ func TestFetchAndUpdateState(t *testing.T) {
 				UnitMeta: internal.UnitMeta{
 					ModulePath:        "nonredistributable.mod/module",
 					Version:           sample.VersionString,
+					HasGoMod:          true,
 					CommitTime:        testProxyCommitTime,
 					SourceInfo:        nil,
 					IsRedistributable: false,
@@ -240,6 +235,7 @@ func TestFetchAndUpdateState(t *testing.T) {
 						{Types: []string{"UNKNOWN"}, FilePath: "foo/LICENSE.md"},
 					},
 				},
+				NumImports: 2,
 			},
 		}, {
 			modulePath: "std",
@@ -249,8 +245,9 @@ func TestFetchAndUpdateState(t *testing.T) {
 				UnitMeta: internal.UnitMeta{
 					ModulePath:        "std",
 					Version:           "v1.12.5",
+					HasGoMod:          true,
 					CommitTime:        stdlib.TestCommitTime,
-					SourceInfo:        source.NewGitHubInfo(goRepositoryURLPrefix+"/go", "src", "go1.12.5"),
+					SourceInfo:        source.NewStdlibInfo("v1.12.5"),
 					IsRedistributable: true,
 					Path:              "context",
 					Name:              "context",
@@ -261,17 +258,14 @@ func TestFetchAndUpdateState(t *testing.T) {
 						},
 					},
 				},
+				NumImports: 5,
 				Documentation: &internal.Documentation{
 					Synopsis: "Package context defines the Context type, which carries deadlines, cancelation signals, and other request-scoped values across API boundaries and between processes.",
-					HTML:     html("This example demonstrates the use of a cancelable context to prevent a\ngoroutine leak."),
 					GOOS:     "linux",
 					GOARCH:   "amd64",
 				},
-				Readme: &internal.Readme{
-					Filepath: "README.md",
-					Contents: "# The Go Programming Language\n",
-				},
 			},
+			wantDoc: []string{"This example demonstrates the use of a cancelable context to prevent a\ngoroutine leak."},
 		}, {
 			modulePath: "std",
 			version:    "v1.12.5",
@@ -280,8 +274,9 @@ func TestFetchAndUpdateState(t *testing.T) {
 				UnitMeta: internal.UnitMeta{
 					ModulePath:        "std",
 					Version:           "v1.12.5",
+					HasGoMod:          true,
 					CommitTime:        stdlib.TestCommitTime,
-					SourceInfo:        source.NewGitHubInfo(goRepositoryURLPrefix+"/go", "src", "go1.12.5"),
+					SourceInfo:        source.NewStdlibInfo("v1.12.5"),
 					IsRedistributable: true,
 					Path:              "builtin",
 					Name:              "builtin",
@@ -294,15 +289,11 @@ func TestFetchAndUpdateState(t *testing.T) {
 				},
 				Documentation: &internal.Documentation{
 					Synopsis: "Package builtin provides documentation for Go's predeclared identifiers.",
-					HTML:     html("int64 is the set of all signed 64-bit integers."),
 					GOOS:     "linux",
 					GOARCH:   "amd64",
 				},
-				Readme: &internal.Readme{
-					Filepath: "README.md",
-					Contents: "# The Go Programming Language\n",
-				},
 			},
+			wantDoc: []string{"int64 is the set of all signed 64-bit integers."},
 		}, {
 			modulePath: "std",
 			version:    "v1.12.5",
@@ -311,8 +302,9 @@ func TestFetchAndUpdateState(t *testing.T) {
 				UnitMeta: internal.UnitMeta{
 					ModulePath:        "std",
 					Version:           "v1.12.5",
+					HasGoMod:          true,
 					CommitTime:        stdlib.TestCommitTime,
-					SourceInfo:        source.NewGitHubInfo(goRepositoryURLPrefix+"/go", "src", "go1.12.5"),
+					SourceInfo:        source.NewStdlibInfo("v1.12.5"),
 					IsRedistributable: true,
 					Path:              "encoding/json",
 					Name:              "json",
@@ -323,18 +315,15 @@ func TestFetchAndUpdateState(t *testing.T) {
 						},
 					},
 				},
+				NumImports: 15,
 				Documentation: &internal.Documentation{
-					HTML:     html("The mapping between JSON and Go values is described\nin the documentation for the Marshal and Unmarshal functions."),
 					Synopsis: "Package json implements encoding and decoding of JSON as defined in RFC 7159.",
 					GOOS:     "linux",
 					GOARCH:   "amd64",
 				},
-				Readme: &internal.Readme{
-					Filepath: "README.md",
-					Contents: "# The Go Programming Language\n",
-				},
 			},
-			moreWantDoc: []string{
+			wantDoc: []string{
+				"The mapping between JSON and Go values is described\nin the documentation for the Marshal and Unmarshal functions.",
 				"Example (CustomMarshalJSON)",
 				`<summary class="Documentation-exampleDetailsHeader">Example (CustomMarshalJSON) <a href="#example-package-CustomMarshalJSON">¶</a></summary>`,
 				"Package (CustomMarshalJSON)",
@@ -355,6 +344,7 @@ func TestFetchAndUpdateState(t *testing.T) {
 				UnitMeta: internal.UnitMeta{
 					ModulePath:        buildConstraintsMod.ModulePath,
 					Version:           buildConstraintsMod.Version,
+					HasGoMod:          false,
 					CommitTime:        testProxyCommitTime,
 					IsRedistributable: true,
 					Path:              buildConstraintsMod.ModulePath + "/cpu",
@@ -365,11 +355,11 @@ func TestFetchAndUpdateState(t *testing.T) {
 				},
 				Documentation: &internal.Documentation{
 					Synopsis: "Package cpu implements processor feature detection used by the Go standard library.",
-					HTML:     html("const CacheLinePadSize = 3"),
 					GOOS:     "linux",
 					GOARCH:   "amd64",
 				},
 			},
+			wantDoc: []string{"const CacheLinePadSize = 3"},
 			dontWantDoc: []string{
 				"const CacheLinePadSize = 1",
 				"const CacheLinePadSize = 2",
@@ -377,13 +367,12 @@ func TestFetchAndUpdateState(t *testing.T) {
 		},
 	}
 
+	sourceClient := source.NewClient(sourceTimeout)
+	f := &Fetcher{proxyClient, sourceClient, testDB}
 	for _, test := range testCases {
 		t.Run(test.pkg, func(t *testing.T) {
 			defer postgres.ResetTestDB(testDB, t)
-
-			sourceClient := source.NewClient(sourceTimeout)
-
-			if _, err := FetchAndUpdateState(ctx, test.modulePath, test.version, proxyClient, sourceClient, testDB, testAppVersion); err != nil {
+			if _, _, err := f.FetchAndUpdateState(ctx, test.modulePath, test.version, testAppVersion, false); err != nil {
 				t.Fatalf("FetchAndUpdateState(%q, %q, %v, %v, %v): %v", test.modulePath, test.version, proxyClient, sourceClient, testDB, err)
 			}
 
@@ -398,13 +387,15 @@ func TestFetchAndUpdateState(t *testing.T) {
 				t.Fatalf("testDB.GetUnitMeta(ctx, %q, %q) mismatch (-want +got):\n%s", test.modulePath, test.version, diff)
 			}
 
-			gotPkg, err := testDB.GetUnit(ctx, got, internal.WithReadme|internal.WithDocumentation)
+			gotPkg, err := testDB.GetUnit(ctx, got, internal.WithMain)
 			if err != nil {
 				t.Fatal(err)
 			}
+
 			if diff := cmp.Diff(test.want, gotPkg,
 				cmp.AllowUnexported(source.Info{}),
-				cmpopts.IgnoreFields(internal.Unit{}, "Documentation")); diff != "" {
+				cmpopts.IgnoreFields(internal.Unit{}, "Documentation"),
+				cmpopts.IgnoreFields(internal.Unit{}, "Subdirectories")); diff != "" {
 				t.Errorf("mismatch on readme (-want +got):\n%s", diff)
 			}
 			if got, want := gotPkg.Documentation, test.want.Documentation; got == nil || want == nil {
@@ -413,19 +404,21 @@ func TestFetchAndUpdateState(t *testing.T) {
 				}
 				return
 			}
-
-			if !strings.Contains(gotPkg.Documentation.HTML.String(), test.want.Documentation.HTML.String()) {
-				t.Errorf("got documentation doesn't contain wanted documentation substring:\ngot: %q\nwant (substring): %q",
-					gotPkg.Documentation.HTML.String(), test.want.Documentation.HTML.String())
-			}
-			for _, want := range test.moreWantDoc {
-				if got := gotPkg.Documentation.HTML.String(); !strings.Contains(got, want) {
-					t.Errorf("got documentation doesn't contain wanted documentation substring:\ngot: %q\nwant (substring): %q", got, want)
+			if gotPkg.Documentation != nil {
+				parts, err := godoc.RenderPartsFromUnit(ctx, gotPkg)
+				if err != nil {
+					t.Fatal(err)
 				}
-			}
-			for _, dontWant := range test.dontWantDoc {
-				if got := gotPkg.Documentation.HTML.String(); strings.Contains(got, dontWant) {
-					t.Errorf("got documentation contains unwanted documentation substring:\ngot: %q\ndontWant (substring): %q", got, dontWant)
+				gotDoc := parts.Body.String()
+				for _, want := range test.wantDoc {
+					if !strings.Contains(gotDoc, want) {
+						t.Errorf("got documentation doesn't contain wanted documentation substring:\ngot: %q\nwant (substring): %q", gotDoc, want)
+					}
+				}
+				for _, dontWant := range test.dontWantDoc {
+					if strings.Contains(gotDoc, dontWant) {
+						t.Errorf("got documentation contains unwanted documentation substring:\ngot: %q\ndontWant (substring): %q", gotDoc, dontWant)
+					}
 				}
 			}
 		})

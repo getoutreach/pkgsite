@@ -16,24 +16,21 @@ import (
 	"time"
 
 	"cloud.google.com/go/profiler"
-	"github.com/go-redis/redis/v7"
+	"github.com/go-redis/redis/v8"
 	"github.com/google/safehtml/template"
+	_ "github.com/jackc/pgx/v4/stdlib" // for pgx driver
 	"golang.org/x/pkgsite/cmd/internal/cmdconfig"
 	"golang.org/x/pkgsite/internal/config"
-	"golang.org/x/pkgsite/internal/database"
 	"golang.org/x/pkgsite/internal/dcensus"
 	"golang.org/x/pkgsite/internal/fetch"
 	"golang.org/x/pkgsite/internal/index"
-	"golang.org/x/pkgsite/internal/queue"
-	"golang.org/x/pkgsite/internal/source"
-	"golang.org/x/pkgsite/internal/worker"
-
 	"golang.org/x/pkgsite/internal/log"
 	"golang.org/x/pkgsite/internal/middleware"
 	"golang.org/x/pkgsite/internal/postgres"
 	"golang.org/x/pkgsite/internal/proxy"
-
-	"contrib.go.opencensus.io/integrations/ocsql"
+	"golang.org/x/pkgsite/internal/queue"
+	"golang.org/x/pkgsite/internal/source"
+	"golang.org/x/pkgsite/internal/worker"
 )
 
 var (
@@ -66,20 +63,9 @@ func main() {
 
 	readProxyRemoved(ctx)
 
-	// Wrap the postgres driver with OpenCensus instrumentation.
-	driverName, err := ocsql.Register("postgres", ocsql.WithAllTraceOptions())
+	db, err := cmdconfig.OpenDB(ctx, cfg, *bypassLicenseCheck)
 	if err != nil {
-		log.Fatalf(ctx, "unable to register the ocsql driver: %v\n", err)
-	}
-	ddb, err := database.Open(driverName, cfg.DBConnInfo(), cfg.InstanceID)
-	if err != nil {
-		log.Fatalf(ctx, "database.Open: %v", err)
-	}
-	var db *postgres.DB
-	if *bypassLicenseCheck {
-		db = postgres.NewBypassingLicenseCheck(ddb)
-	} else {
-		db = postgres.New(ddb)
+		log.Fatalf(ctx, "%v", err)
 	}
 	defer db.Close()
 
@@ -97,7 +83,13 @@ func main() {
 	expg := cmdconfig.ExperimentGetter(ctx, cfg)
 	fetchQueue, err := queue.New(ctx, cfg, queueName, *workers, expg,
 		func(ctx context.Context, modulePath, version string) (int, error) {
-			return worker.FetchAndUpdateState(ctx, modulePath, version, proxyClient, sourceClient, db, cfg.AppVersionLabel())
+			f := &worker.Fetcher{
+				ProxyClient:  proxyClient,
+				SourceClient: sourceClient,
+				DB:           db,
+			}
+			code, _, err := f.FetchAndUpdateState(ctx, modulePath, version, cfg.AppVersionLabel(), false)
+			return code, err
 		})
 	if err != nil {
 		log.Fatalf(ctx, "queue.New: %v", err)
@@ -108,17 +100,16 @@ func main() {
 	redisCacheClient := getCacheRedis(ctx, cfg)
 	experimenter := cmdconfig.Experimenter(ctx, cfg, expg, reportingClient)
 	server, err := worker.NewServer(cfg, worker.ServerConfig{
-		DB:                   db,
-		IndexClient:          indexClient,
-		ProxyClient:          proxyClient,
-		SourceClient:         sourceClient,
-		RedisHAClient:        redisHAClient,
-		RedisCacheClient:     redisCacheClient,
-		Queue:                fetchQueue,
-		ReportingClient:      reportingClient,
-		TaskIDChangeInterval: config.TaskIDChangeIntervalWorker,
-		StaticPath:           template.TrustedSourceFromFlag(flag.Lookup("static").Value),
-		GetExperiments:       experimenter.Experiments,
+		DB:               db,
+		IndexClient:      indexClient,
+		ProxyClient:      proxyClient,
+		SourceClient:     sourceClient,
+		RedisHAClient:    redisHAClient,
+		RedisCacheClient: redisCacheClient,
+		Queue:            fetchQueue,
+		ReportingClient:  reportingClient,
+		StaticPath:       template.TrustedSourceFromFlag(flag.Lookup("static").Value),
+		GetExperiments:   experimenter.Experiments,
 	})
 	if err != nil {
 		log.Fatal(ctx, err)
@@ -128,6 +119,7 @@ func main() {
 
 	views := append(dcensus.ServerViews,
 		worker.EnqueueResponseCount,
+		worker.ProcessingLag,
 		fetch.FetchLatencyDistribution,
 		fetch.FetchResponseCount,
 		fetch.SheddedFetchCount,

@@ -10,6 +10,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+
+	"cloud.google.com/go/errorreporting"
 )
 
 //lint:file-ignore ST1012 prefixing error values with Err would stutter
@@ -21,6 +23,12 @@ var (
 
 	// NotFound indicates that a requested entity was not found (HTTP 404).
 	NotFound = errors.New("not found")
+
+	// NotFetched means that the proxy returned "not found" with the
+	// Disable-Module-Fetch header set. We don't know if the module really
+	// doesn't exist, or the proxy just didn't fetch it.
+	NotFetched = errors.New("not fetched by proxy")
+
 	// InvalidArgument indicates that the input into the request is invalid in
 	// some way (HTTP 400).
 	InvalidArgument = errors.New("invalid argument")
@@ -107,6 +115,7 @@ var codes = []struct {
 	// Since the following aren't HTTP statuses, pick unused codes.
 	{HasIncompletePackages, 290},
 	{DBModuleInsertInvalid, 480},
+	{NotFetched, 481},
 	{BadModule, 490},
 	{AlternativeModule, 491},
 	{ModuleTooLarge, 492},
@@ -214,5 +223,27 @@ func Add(errp *error, format string, args ...interface{}) {
 func Wrap(errp *error, format string, args ...interface{}) {
 	if *errp != nil {
 		*errp = fmt.Errorf("%s: %w", fmt.Sprintf(format, args...), *errp)
+	}
+}
+
+// WrapAndReport calls Wrap followed by Report.
+func WrapAndReport(errp *error, format string, args ...interface{}) {
+	Wrap(errp, format, args...)
+	if *errp != nil {
+		Report(*errp)
+	}
+}
+
+var repClient *errorreporting.Client
+
+// SetReportingClient sets an errorreporting client, for use by Report.
+func SetReportingClient(c *errorreporting.Client) {
+	repClient = c
+}
+
+// Report uses the errorreporting API to report an error.
+func Report(err error) {
+	if repClient != nil {
+		repClient.Report(errorreporting.Entry{Error: err})
 	}
 }

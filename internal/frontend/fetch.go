@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/safehtml/template"
 	"go.opencensus.io/stats"
 	"go.opencensus.io/stats/view"
 	"go.opencensus.io/tag"
@@ -187,7 +188,7 @@ func (s *Server) checkPossibleModulePaths(ctx context.Context, db *postgres.DB,
 
 			// A row for this modulePath and requestedVersion combination does not
 			// exist in version_map. Enqueue the module version to be fetched.
-			if _, err := s.queue.ScheduleFetch(ctx, modulePath, requestedVersion, "", s.taskIDChangeInterval); err != nil {
+			if _, err := s.queue.ScheduleFetch(ctx, modulePath, requestedVersion, "", false); err != nil {
 				fr.err = err
 				fr.status = http.StatusInternalServerError
 			}
@@ -233,11 +234,13 @@ func fetchRequestStatusAndResponseText(results []*fetchResult, fullPath, request
 		case http.StatusInternalServerError:
 			return fr.status, "Oops! Something went wrong."
 		case derrors.ToStatus(derrors.AlternativeModule):
-			// TODO(https://golang.org/issue/40306): Make the canonical module
-			// path a clickable link.
-			return http.StatusNotFound,
-				fmt.Sprintf("“%s” is not a valid package or module. Were you looking for “%s”?",
-					displayPath(fullPath, requestedVersion), fr.goModPath)
+			t := template.Must(template.New("").Parse(`{{.}}`))
+			h, err := t.ExecuteToHTML(fmt.Sprintf("%s is not a valid path. Were you looking for “<a href='https://pkg.go.dev/%s'>%s</a>”?",
+				displayPath(fullPath, requestedVersion), fr.goModPath, fr.goModPath))
+			if err != nil {
+				return http.StatusInternalServerError, err.Error()
+			}
+			return http.StatusNotFound, h.String()
 		}
 
 		// A module was found for a prefix of the path, but the path did not exist
@@ -251,13 +254,17 @@ func fetchRequestStatusAndResponseText(results []*fetchResult, fullPath, request
 		}
 	}
 	if moduleMatchingPathPrefix != "" {
-		// TODO(https://golang.org/issue/40306): Make the link clickable.
-		return http.StatusNotFound,
-			fmt.Sprintf("Package “%s” could not be found, but you can view module “%s” at https://pkg.go.dev/mod/%s.",
-				displayPath(fullPath, requestedVersion),
-				displayPath(moduleMatchingPathPrefix, requestedVersion),
-				displayPath(moduleMatchingPathPrefix, requestedVersion),
-			)
+		t := template.Must(template.New("").Parse(`{{.}}`))
+		h, err := t.ExecuteToHTML(fmt.Sprintf("Package %s could not be found, but you can view module “%s” at <a href='https://pkg.go.dev/%s'>pkg.go.dev/%s</a>.",
+			displayPath(fullPath, requestedVersion),
+			displayPath(moduleMatchingPathPrefix, requestedVersion),
+			displayPath(moduleMatchingPathPrefix, requestedVersion),
+			displayPath(moduleMatchingPathPrefix, requestedVersion),
+		))
+		if err != nil {
+			return http.StatusInternalServerError, err.Error()
+		}
+		return http.StatusNotFound, h.String()
 	}
 	p := fullPath
 	if requestedVersion != internal.LatestVersion {
@@ -450,7 +457,6 @@ var vcsHostsWithThreeElementRepoName = map[string]bool{
 	"gitee.com":     true,
 	"github.com":    true,
 	"gitlab.com":    true,
-	"golang.org":    true,
 }
 
 // maxPathsToFetch is the number of modulePaths that are fetched from a single
@@ -461,6 +467,12 @@ var maxPathsToFetch = 10
 // candidateModulePaths returns the potential module paths that could contain
 // the fullPath. The paths are returned in reverse length order.
 func candidateModulePaths(fullPath string) (_ []string, err error) {
+	if !isValidPath(fullPath) {
+		return nil, &serverError{
+			status: http.StatusBadRequest,
+			err:    fmt.Errorf("isValidPath(%q): false", fullPath),
+		}
+	}
 	var (
 		path        string
 		modulePaths []string
@@ -511,7 +523,7 @@ func FetchAndUpdateState(ctx context.Context, modulePath, requestedVersion strin
 		derrors.Wrap(&err, "FetchAndUpdateState(%q, %q)", modulePath, requestedVersion)
 	}()
 
-	fr := fetch.FetchModule(ctx, modulePath, requestedVersion, proxyClient, sourceClient)
+	fr := fetch.FetchModule(ctx, modulePath, requestedVersion, proxyClient, sourceClient, false)
 	defer fr.Defer()
 	if fr.Error == nil {
 		// Only attempt to insert the module into module_version_states if the

@@ -83,42 +83,7 @@ func Render(ctx context.Context, fset *token.FileSet, p *doc.Package, opt Render
 		opt.Limit = 10 * megabyte
 	}
 
-	funcs, data := renderInfo(ctx, fset, p, opt)
-	p = data.Package
-	if experiment.IsActive(ctx, internal.ExperimentUnitPage) {
-		if p.Doc == "" &&
-			len(p.Examples) == 0 &&
-			len(p.Consts) == 0 &&
-			len(p.Vars) == 0 &&
-			len(p.Types) == 0 &&
-			len(p.Funcs) == 0 {
-			return safehtml.HTML{}, nil
-		}
-	}
-
-	h := htmlPackage(ctx)
-	tmpl := template.Must(h.Clone()).Funcs(funcs)
-	return executeToHTMLWithLimit(tmpl, data, opt.Limit)
-}
-
-// Render renders package documentation HTML for the
-// provided file set and package, in separate parts.
-//
-// If any of the rendered documentation part HTML sizes exceeds the specified limit,
-// an error with ErrTooLarge in its chain will be returned.
-func RenderParts(ctx context.Context, fset *token.FileSet, p *doc.Package, opt RenderOptions) (body, outline, mobileOutline safehtml.HTML, err error) {
-	defer derrors.Wrap(&err, "dochtml.RenderParts")
-
-	if !experiment.IsActive(ctx, internal.ExperimentUnitPage) {
-		return safehtml.HTML{}, safehtml.HTML{}, safehtml.HTML{}, errors.New("should only be called if the unit-page experiment is active")
-	}
-
-	if opt.Limit == 0 {
-		const megabyte = 1000 * 1000
-		opt.Limit = 10 * megabyte
-	}
-
-	funcs, data := renderInfo(ctx, fset, p, opt)
+	funcs, data, _ := renderInfo(ctx, fset, p, opt)
 	p = data.Package
 	if p.Doc == "" &&
 		len(p.Examples) == 0 &&
@@ -126,10 +91,44 @@ func RenderParts(ctx context.Context, fset *token.FileSet, p *doc.Package, opt R
 		len(p.Vars) == 0 &&
 		len(p.Types) == 0 &&
 		len(p.Funcs) == 0 {
-		return safehtml.HTML{}, safehtml.HTML{}, safehtml.HTML{}, nil
+		return safehtml.HTML{}, nil
 	}
-	h := htmlPackage(ctx)
-	tmpl := template.Must(h.Clone()).Funcs(funcs)
+	tmpl := template.Must(unitTemplate.Clone()).Funcs(funcs)
+	return executeToHTMLWithLimit(tmpl, data, opt.Limit)
+}
+
+// Parts contains HTML for each part of the documentation.
+type Parts struct {
+	Body          safehtml.HTML // main body of doc
+	Outline       safehtml.HTML // outline for large screens
+	MobileOutline safehtml.HTML // outline for mobile
+	Links         []render.Link // "Links" section of package doc
+}
+
+// Render renders package documentation HTML for the
+// provided file set and package, in separate parts.
+//
+// If any of the rendered documentation part HTML sizes exceeds the specified limit,
+// an error with ErrTooLarge in its chain will be returned.
+func RenderParts(ctx context.Context, fset *token.FileSet, p *doc.Package, opt RenderOptions) (_ *Parts, err error) {
+	defer derrors.Wrap(&err, "dochtml.RenderParts")
+
+	if opt.Limit == 0 {
+		const megabyte = 1000 * 1000
+		opt.Limit = 10 * megabyte
+	}
+
+	funcs, data, links := renderInfo(ctx, fset, p, opt)
+	p = data.Package
+	if p.Doc == "" &&
+		len(p.Examples) == 0 &&
+		len(p.Consts) == 0 &&
+		len(p.Vars) == 0 &&
+		len(p.Types) == 0 &&
+		len(p.Funcs) == 0 {
+		return &Parts{}, nil
+	}
+	tmpl := template.Must(unitTemplate.Clone()).Funcs(funcs)
 
 	exec := func(name string) safehtml.HTML {
 		if err != nil {
@@ -145,17 +144,29 @@ func RenderParts(ctx context.Context, fset *token.FileSet, p *doc.Package, opt R
 		return html
 	}
 
-	body = exec("body.tmpl")
-	outline = exec("sidenav.tmpl")
-	mobileOutline = exec("sidenav-mobile.tmpl")
-	if err != nil {
-		return safehtml.HTML{}, safehtml.HTML{}, safehtml.HTML{}, err
+	var outline safehtml.HTML
+	if experiment.IsActive(ctx, internal.ExperimentReadmeOutline) {
+		outline = exec("outline.tmpl")
+	} else {
+		outline = exec("sidenav.tmpl")
 	}
-	return body, outline, mobileOutline, nil
+
+	parts := &Parts{
+		Body:          exec("body.tmpl"),
+		Outline:       outline,
+		MobileOutline: exec("sidenav-mobile.tmpl"),
+		// links must be called after body, because the call to
+		// render_doc_extract_links in body.tmpl creates the links.
+		Links: links(),
+	}
+	if err != nil {
+		return nil, err
+	}
+	return parts, nil
 }
 
 // renderInfo returns the functions and data needed to render the doc.
-func renderInfo(ctx context.Context, fset *token.FileSet, p *doc.Package, opt RenderOptions) (map[string]interface{}, templateData) {
+func renderInfo(ctx context.Context, fset *token.FileSet, p *doc.Package, opt RenderOptions) (map[string]interface{}, templateData, func() []render.Link) {
 	// Make a copy to avoid modifying caller's *doc.Package.
 	p2 := *p
 	p = &p2
@@ -200,13 +211,14 @@ func renderInfo(ctx context.Context, fset *token.FileSet, p *doc.Package, opt Re
 		return linkHTML(name, opt.SourceLinkFunc(node), "Documentation-source")
 	}
 	funcs := map[string]interface{}{
-		"render_short_synopsis": r.ShortSynopsis,
-		"render_synopsis":       r.Synopsis,
-		"render_doc":            r.DocHTML,
-		"render_decl":           r.DeclHTML,
-		"render_code":           r.CodeHTML,
-		"file_link":             fileLink,
-		"source_link":           sourceLink,
+		"render_short_synopsis":    r.ShortSynopsis,
+		"render_synopsis":          r.Synopsis,
+		"render_doc":               r.DocHTML,
+		"render_doc_extract_links": r.DocHTMLExtractLinks,
+		"render_decl":              r.DeclHTML,
+		"render_code":              r.CodeHTML,
+		"file_link":                fileLink,
+		"source_link":              sourceLink,
 	}
 	data := templateData{
 		RootURL:     "/pkg",
@@ -214,7 +226,7 @@ func renderInfo(ctx context.Context, fset *token.FileSet, p *doc.Package, opt Re
 		Examples:    collectExamples(p),
 		NoteHeaders: buildNoteHeaders(p.Notes),
 	}
-	return funcs, data
+	return funcs, data, r.Links
 }
 
 // executeToHTMLWithLimit executes tmpl on data and returns the result as a safehtml.HTML.

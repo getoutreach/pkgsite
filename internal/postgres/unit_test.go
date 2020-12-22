@@ -160,17 +160,12 @@ func TestGetUnit(t *testing.T) {
 				test.want.Name,
 				test.want.IsRedistributable,
 			)
-			t.Run("unit page with one query", func(t *testing.T) {
-				checkUnit(ctx, t, um, test.want, internal.ExperimentUnitPage, internal.ExperimentGetUnitWithOneQuery)
+			test.want.CommitTime = um.CommitTime
+			t.Run("no experiment", func(t *testing.T) {
+				checkUnit(ctx, t, um, test.want)
 			})
-			t.Run("unit page", func(t *testing.T) {
-				checkUnit(ctx, t, um, test.want, internal.ExperimentUnitPage)
-			})
-			t.Run("no experiments", func(t *testing.T) {
-				test.want.Readme = &internal.Readme{
-					Filepath: sample.ReadmeFilePath,
-					Contents: sample.ReadmeContents,
-				}
+			t.Run("with experiment", func(t *testing.T) {
+				ctx := experiment.NewContext(ctx, internal.ExperimentGetUnitMetaQuery)
 				checkUnit(ctx, t, um, test.want)
 			})
 		})
@@ -190,16 +185,12 @@ func checkUnit(ctx context.Context, t *testing.T, um *internal.UnitMeta, want *i
 		cmpopts.IgnoreFields(licenses.Metadata{}, "Coverage"),
 	}
 	want.SourceInfo = um.SourceInfo
-	if experiment.IsActive(ctx, internal.ExperimentGetUnitWithOneQuery) {
-		want.NumImports = len(want.Imports)
-		opts = append(opts,
-			cmpopts.IgnoreFields(internal.Documentation{}, "HTML"),
-			cmpopts.IgnoreFields(internal.Unit{}, "Imports"),
-			cmpopts.IgnoreFields(internal.Unit{}, "LicenseContents"),
-		)
-		if diff := cmp.Diff(want, got, opts...); diff != "" {
-			t.Errorf("mismatch (-want, +got):\n%s", diff)
-		}
+	want.NumImports = len(want.Imports)
+	opts = append(opts,
+		cmpopts.IgnoreFields(internal.Unit{}, "Imports", "LicenseContents"),
+	)
+	if diff := cmp.Diff(want, got, opts...); diff != "" {
+		t.Errorf("mismatch (-want, +got):\n%s", diff)
 	}
 }
 
@@ -209,16 +200,32 @@ func TestGetUnitFieldSet(t *testing.T) {
 
 	defer ResetTestDB(testDB, t)
 
+	readme := &internal.Readme{
+		Filepath: "a.com/m/dir/p/README.md",
+		Contents: "readme",
+	}
 	// Add a module that has READMEs in a directory and a package.
 	m := sample.Module("a.com/m", "v1.2.3", "dir/p")
+	m.Packages()[0].Readme = readme
 	if err := testDB.InsertModule(ctx, m); err != nil {
 		t.Fatal(err)
 	}
 
 	cleanFields := func(u *internal.Unit, fields internal.FieldSet) {
 		// Add/remove fields based on the FieldSet specified.
-		if fields&internal.WithDocumentation != 0 {
+		if fields&internal.WithMain != 0 {
 			u.Documentation = sample.Documentation
+			u.Readme = readme
+			u.NumImports = len(sample.Imports)
+			u.Subdirectories = []*internal.PackageMeta{
+				{
+					Path:              "a.com/m/dir/p",
+					Name:              "p",
+					Synopsis:          sample.Synopsis,
+					IsRedistributable: true,
+					Licenses:          sample.LicenseMetadata,
+				},
+			}
 		}
 		if fields&internal.WithImports != 0 {
 			u.Imports = sample.Imports
@@ -235,9 +242,9 @@ func TestGetUnitFieldSet(t *testing.T) {
 		want   *internal.Unit
 	}{
 		{
-			name:   "WithDocumentation",
-			fields: internal.WithDocumentation,
-			want:   unit("a.com/m/dir/p", "a.com/m", "v1.2.3", "", nil, []string{}),
+			name:   "WithMain",
+			fields: internal.WithMain,
+			want:   unit("a.com/m/dir/p", "a.com/m", "v1.2.3", "", readme, []string{}),
 		},
 		{
 			name:   "WithImports",
@@ -249,25 +256,16 @@ func TestGetUnitFieldSet(t *testing.T) {
 			fields: internal.WithLicenses,
 			want:   unit("a.com/m/dir/p", "a.com/m", "v1.2.3", "", nil, []string{}),
 		},
-		{
-			name:   "WithReadme",
-			fields: internal.WithReadme,
-			want: unit("a.com/m/dir/p", "a.com/m", "v1.2.3", "",
-				&internal.Readme{
-					Filepath: "README.md",
-					Contents: "readme",
-				}, []string{}),
-		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			pathInfo := sample.UnitMeta(
+			um := sample.UnitMeta(
 				test.want.Path,
 				test.want.ModulePath,
 				test.want.Version,
 				test.want.Name,
 				test.want.IsRedistributable,
 			)
-			got, err := testDB.GetUnit(ctx, pathInfo, test.fields)
+			got, err := testDB.GetUnit(ctx, um, test.fields)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -276,7 +274,8 @@ func TestGetUnitFieldSet(t *testing.T) {
 				// The packages table only includes partial license information; it omits the Coverage field.
 				cmpopts.IgnoreFields(licenses.Metadata{}, "Coverage"),
 			}
-			test.want.SourceInfo = pathInfo.SourceInfo
+			test.want.CommitTime = um.CommitTime
+			test.want.SourceInfo = um.SourceInfo
 			cleanFields(test.want, test.fields)
 			if diff := cmp.Diff(test.want, got, opts...); diff != "" {
 				t.Errorf("mismatch (-want, +got):\n%s", diff)

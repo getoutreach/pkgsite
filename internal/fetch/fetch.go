@@ -109,7 +109,7 @@ type FetchResult struct {
 // Callers of FetchModule must
 //   defer fr.Defer()
 // immediately after the call.
-func FetchModule(ctx context.Context, modulePath, requestedVersion string, proxyClient *proxy.Client, sourceClient *source.Client) (fr *FetchResult) {
+func FetchModule(ctx context.Context, modulePath, requestedVersion string, proxyClient *proxy.Client, sourceClient *source.Client, disableProxyFetch bool) (fr *FetchResult) {
 	start := time.Now()
 	fr = &FetchResult{
 		ModulePath:       modulePath,
@@ -152,37 +152,43 @@ func FetchModule(ctx context.Context, modulePath, requestedVersion string, proxy
 		}
 		fr.ResolvedVersion = resolvedVersion
 	} else {
-		info, err := proxyClient.GetInfo(ctx, modulePath, requestedVersion)
+		getInfo := proxyClient.GetInfo
+		if disableProxyFetch {
+			getInfo = proxyClient.GetInfoNoFetch
+		}
+		info, err := getInfo(ctx, modulePath, requestedVersion)
 		if err != nil {
 			fr.Error = err
 			return fr
 		}
 		fr.ResolvedVersion = info.Version
 		commitTime = info.Time
-		zipSize, err = proxyClient.GetZipSize(ctx, modulePath, fr.ResolvedVersion)
-		if err != nil {
-			fr.Error = err
-			return fr
+		if zipLoadShedder != nil {
+			zipSize, err = proxyClient.GetZipSize(ctx, modulePath, fr.ResolvedVersion)
+			if err != nil {
+				fr.Error = err
+				return fr
+			}
 		}
 	}
-
-	// Load shed or mark module as too large.
-	// We treat zip size
-	// as a proxy for the total memory consumed by processing a module, and use
-	// it to decide whether we can currently afford to process a module.
-	shouldShed, deferFunc := zipLoadShedder.shouldShed(uint64(zipSize))
-	fr.Defer = deferFunc
-	if shouldShed {
-		fr.Error = fmt.Errorf("%w: size=%dMi", derrors.SheddingLoad, zipSize/mib)
-		stats.Record(ctx, fetchesShedded.M(1))
-		return fr
-	}
-
-	if zipSize > maxModuleZipSize {
-		log.Warningf(ctx, "FetchModule: %s@%s zip size %dMi exceeds max %dMi",
-			modulePath, fr.ResolvedVersion, zipSize/mib, maxModuleZipSize/mib)
-		fr.Error = derrors.ModuleTooLarge
-		return fr
+	if zipLoadShedder != nil {
+		// Load shed or mark module as too large.
+		// We treat zip size as a proxy for the total memory consumed by
+		// processing a module, and use it to decide whether we can currently
+		// afford to process a module.
+		shouldShed, deferFunc := zipLoadShedder.shouldShed(uint64(zipSize))
+		fr.Defer = deferFunc
+		if shouldShed {
+			fr.Error = fmt.Errorf("%w: size=%dMi", derrors.SheddingLoad, zipSize/mib)
+			stats.Record(ctx, fetchesShedded.M(1))
+			return fr
+		}
+		if zipSize > maxModuleZipSize {
+			log.Warningf(ctx, "FetchModule: %s@%s zip size %dMi exceeds max %dMi",
+				modulePath, fr.ResolvedVersion, zipSize/mib, maxModuleZipSize/mib)
+			fr.Error = derrors.ModuleTooLarge
+			return fr
+		}
 	}
 
 	// Proceed with the fetch.

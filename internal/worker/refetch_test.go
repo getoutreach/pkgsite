@@ -42,10 +42,10 @@ func TestReFetch(t *testing.T) {
 		}
 		pkgBar = sample.ModulePath + "/bar"
 		foobar = map[string]string{
-			"foo/foo.go": "// Package foo\npackage foo\n\nconst Foo = 42",
-			"README.md":  "This is a readme",
-			"LICENSE":    testhelper.MITLicense,
-			"bar/bar.go": "// Package bar\npackage bar\n\nconst Bar = 21",
+			"LICENSE":       testhelper.MITLicense,
+			"bar/README.md": "This is a readme",
+			"bar/bar.go":    "// Package bar\npackage bar\n\nconst Bar = 21",
+			"foo/foo.go":    "// Package foo\npackage foo\n\nconst Foo = 42",
 		}
 	)
 
@@ -60,8 +60,9 @@ func TestReFetch(t *testing.T) {
 	})
 	defer teardownProxy()
 	sourceClient := source.NewClient(sourceTimeout)
-	if _, err := FetchAndUpdateState(ctx, sample.ModulePath, version, proxyClient, sourceClient, testDB, testAppVersion); err != nil {
-		t.Fatalf("FetchAndUpdateState(%q, %q, %v, %v, %v): %v", sample.ModulePath, version, proxyClient, sourceClient, testDB, err)
+	f := &Fetcher{proxyClient, sourceClient, testDB}
+	if _, _, err := f.FetchAndUpdateState(ctx, sample.ModulePath, version, testAppVersion, false); err != nil {
+		t.Fatalf("FetchAndUpdateState(%q, %q): %v", sample.ModulePath, version, err)
 	}
 
 	if _, err := testDB.GetUnitMeta(ctx, pkgFoo, internal.UnknownModulePath, version); err != nil {
@@ -78,8 +79,9 @@ func TestReFetch(t *testing.T) {
 	})
 	defer teardownProxy()
 
-	if _, err := FetchAndUpdateState(ctx, sample.ModulePath, version, proxyClient, sourceClient, testDB, testAppVersion); err != nil {
-		t.Fatalf("FetchAndUpdateState(%q, %q, %v, %v, %v): %v", modulePath, version, proxyClient, sourceClient, testDB, err)
+	f = &Fetcher{proxyClient, sourceClient, testDB}
+	if _, _, err := f.FetchAndUpdateState(ctx, sample.ModulePath, version, testAppVersion, false); err != nil {
+		t.Fatalf("FetchAndUpdateState(%q, %q): %v", modulePath, version, err)
 	}
 	want := &internal.Unit{
 		UnitMeta: internal.UnitMeta{
@@ -95,31 +97,44 @@ func TestReFetch(t *testing.T) {
 			},
 		},
 		Readme: &internal.Readme{
-			Filepath: "README.md",
+			Filepath: "bar/README.md",
 			Contents: "This is a readme",
 		},
 		Documentation: &internal.Documentation{
 			Synopsis: "Package bar",
-			HTML:     html("Bar returns the string &#34;bar&#34;."),
 			GOOS:     "linux",
 			GOARCH:   "amd64",
+		},
+		Subdirectories: []*internal.PackageMeta{
+			{
+				Path:              "github.com/valid/module_name/bar",
+				Name:              "bar",
+				Synopsis:          "Package bar",
+				IsRedistributable: true,
+				Licenses:          sample.LicenseMetadata,
+			},
 		},
 	}
 	got, err := testDB.GetUnitMeta(ctx, pkgBar, internal.UnknownModulePath, version)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if diff := cmp.Diff(want.UnitMeta, *got, cmp.AllowUnexported(source.Info{})); diff != "" {
+	if diff := cmp.Diff(want.UnitMeta, *got,
+		cmp.AllowUnexported(source.Info{}),
+		cmpopts.IgnoreFields(licenses.Metadata{}, "Coverage"),
+		cmpopts.IgnoreFields(internal.UnitMeta{}, "HasGoMod")); diff != "" {
 		t.Fatalf("testDB.GetUnitMeta(ctx, %q, %q) mismatch (-want +got):\n%s", want.ModulePath, want.Version, diff)
 	}
 
-	gotPkg, err := testDB.GetUnit(ctx, got, internal.WithReadme|internal.WithDocumentation)
+	gotPkg, err := testDB.GetUnit(ctx, got, internal.WithMain)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if diff := cmp.Diff(want, gotPkg,
 		cmp.AllowUnexported(source.Info{}),
-		cmpopts.IgnoreFields(internal.Unit{}, "Documentation")); diff != "" {
+		cmpopts.IgnoreFields(internal.Unit{}, "Documentation"),
+		cmpopts.IgnoreFields(licenses.Metadata{}, "Coverage"),
+		cmpopts.IgnoreFields(internal.UnitMeta{}, "HasGoMod")); diff != "" {
 		t.Errorf("mismatch on readme (-want +got):\n%s", diff)
 	}
 	if got, want := gotPkg.Documentation, want.Documentation; got == nil || want == nil {
@@ -138,7 +153,8 @@ func TestReFetch(t *testing.T) {
 		},
 	})
 	defer teardownProxy()
-	if _, err := FetchAndUpdateState(ctx, modulePath, version, proxyClient, sourceClient, testDB, testAppVersion); !errors.Is(err, derrors.DBModuleInsertInvalid) {
-		t.Fatalf("FetchAndUpdateState(%q, %q, %v, %v, %v): %v", modulePath, version, proxyClient, sourceClient, testDB, err)
+	f = &Fetcher{proxyClient, sourceClient, testDB}
+	if _, _, err := f.FetchAndUpdateState(ctx, modulePath, version, testAppVersion, false); !errors.Is(err, derrors.DBModuleInsertInvalid) {
+		t.Fatalf("FetchAndUpdateState(%q, %q): %v", modulePath, version, err)
 	}
 }

@@ -13,9 +13,9 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/google/safehtml"
 	"golang.org/x/pkgsite/internal"
+	"golang.org/x/pkgsite/internal/experiment"
 	"golang.org/x/pkgsite/internal/licenses"
 	"golang.org/x/pkgsite/internal/source"
-	"golang.org/x/pkgsite/internal/stdlib"
 	"golang.org/x/pkgsite/internal/testing/sample"
 )
 
@@ -36,6 +36,10 @@ func TestGetUnitMeta(t *testing.T) {
 		{"m.com", "v2.0.0+incompatible", "a", false},
 		{"m.com/a", "v1.1.0", "b", false},
 		{"m.com/b", "v2.0.0+incompatible", "a", true},
+		{"cloud.google.com/go", "v0.69.0", "pubsublite", false},
+		{"cloud.google.com/go/pubsublite", "v0.4.0", "", false},
+		{"cloud.google.com/go", "v0.74.0", "compute/metadata", false},
+		{"cloud.google.com/go/compute/metadata", "v0.0.0-20181115181204-d50f0e9b2506", "", false},
 	} {
 		m := sample.Module(testModule.module, testModule.version, testModule.packageSuffix)
 		if err := testDB.InsertModule(ctx, m); err != nil {
@@ -43,7 +47,7 @@ func TestGetUnitMeta(t *testing.T) {
 		}
 		requested := m.Version
 		if testModule.isMaster {
-			requested = internal.MasterVersion
+			requested = "master"
 		}
 		if err := testDB.UpsertVersionMap(ctx, &internal.VersionMap{
 			ModulePath:       m.ModulePath,
@@ -54,11 +58,28 @@ func TestGetUnitMeta(t *testing.T) {
 		}
 	}
 
-	for _, test := range []struct {
+	type teststruct struct {
 		name                  string
 		path, module, version string
 		want                  *internal.UnitMeta
-	}{
+	}
+
+	checkUnitMeta := func(ctx context.Context, test teststruct) {
+		got, err := testDB.GetUnitMeta(ctx, test.path, test.module, test.version)
+		if err != nil {
+			t.Fatal(err)
+		}
+		opts := []cmp.Option{
+			cmpopts.IgnoreFields(licenses.Metadata{}, "Coverage"),
+			cmpopts.IgnoreFields(internal.UnitMeta{}, "HasGoMod"),
+			cmp.AllowUnexported(source.Info{}, safehtml.HTML{}),
+		}
+		if diff := cmp.Diff(test.want, got, opts...); diff != "" {
+			t.Errorf("mismatch (-want +got):\n%s", diff)
+		}
+	}
+
+	for _, test := range []teststruct{
 		{
 			name:    "known module and version",
 			path:    "m.com/a",
@@ -166,6 +187,26 @@ func TestGetUnitMeta(t *testing.T) {
 				IsRedistributable: true,
 			},
 		},
+		{
+			name: "prefer pubsublite nested module",
+			path: "cloud.google.com/go/pubsublite",
+			want: &internal.UnitMeta{
+				ModulePath:        "cloud.google.com/go/pubsublite",
+				Name:              "pubsublite",
+				Version:           "v0.4.0",
+				IsRedistributable: true,
+			},
+		},
+		{
+			name: "prefer compute metadata in main module",
+			path: "cloud.google.com/go/compute/metadata",
+			want: &internal.UnitMeta{
+				ModulePath:        "cloud.google.com/go",
+				Name:              "metadata",
+				Version:           "v0.74.0",
+				IsRedistributable: true,
+			},
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if test.module == "" {
@@ -182,17 +223,13 @@ func TestGetUnitMeta(t *testing.T) {
 				test.want.IsRedistributable,
 			)
 			test.want.CommitTime = sample.CommitTime
-			got, err := testDB.GetUnitMeta(ctx, test.path, test.module, test.version)
-			if err != nil {
-				t.Fatal(err)
-			}
-			opts := []cmp.Option{
-				cmpopts.IgnoreFields(licenses.Metadata{}, "Coverage"),
-				cmp.AllowUnexported(source.Info{}, safehtml.HTML{}),
-			}
-			if diff := cmp.Diff(test.want, got, opts...); diff != "" {
-				t.Errorf("mismatch (-want +got):\n%s", diff)
-			}
+			t.Run("no experiment", func(t *testing.T) {
+				checkUnitMeta(ctx, test)
+			})
+			t.Run("with experiment", func(t *testing.T) {
+				ctx := experiment.NewContext(ctx, internal.ExperimentGetUnitMetaQuery)
+				checkUnitMeta(ctx, test)
+			})
 		})
 	}
 }
@@ -224,7 +261,7 @@ func TestGetUnitMetaBypass(t *testing.T) {
 		}
 		requested := m.Version
 		if testModule.isMaster {
-			requested = internal.MasterVersion
+			requested = "master"
 		}
 		if err := bypassDB.UpsertVersionMap(ctx, &internal.VersionMap{
 			ModulePath:       m.ModulePath,
@@ -380,6 +417,7 @@ func TestGetUnitMetaBypass(t *testing.T) {
 				}
 				opts := []cmp.Option{
 					cmpopts.IgnoreFields(licenses.Metadata{}, "Coverage"),
+					cmpopts.IgnoreFields(internal.UnitMeta{}, "HasGoMod"),
 					cmp.AllowUnexported(source.Info{}, safehtml.HTML{}),
 				}
 				if diff := cmp.Diff(test.want, got, opts...); diff != "" {
@@ -387,51 +425,5 @@ func TestGetUnitMetaBypass(t *testing.T) {
 				}
 			})
 		}
-	}
-}
-
-func TestGetStdlibPaths(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
-	defer cancel()
-	defer ResetTestDB(testDB, t)
-
-	// Insert two versions of some stdlib packages.
-	for _, data := range []struct {
-		version  string
-		suffixes []string
-	}{
-		{
-			// earlier version; should be ignored
-			"v1.1.0",
-			[]string{"bad/json"},
-		},
-		{
-			"v1.2.0",
-			[]string{
-				"encoding/json",
-				"archive/json",
-				"net/http",     // no "json"
-				"foo/json/moo", // "json" not the last component
-				"bar/xjson",    // "json" not alone
-				"baz/jsonx",    // ditto
-			},
-		},
-	} {
-		m := sample.Module(stdlib.ModulePath, data.version, data.suffixes...)
-		for _, p := range m.Packages() {
-			p.Imports = nil
-		}
-		if err := testDB.InsertModule(ctx, m); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	got, err := testDB.GetStdlibPathsWithSuffix(ctx, "json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []string{"archive/json", "encoding/json"}
-	if !cmp.Equal(got, want) {
-		t.Errorf("got %v, want %v", got, want)
 	}
 }

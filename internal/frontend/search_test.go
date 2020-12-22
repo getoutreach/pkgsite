@@ -89,7 +89,7 @@ func TestFetchSearchPage(t *testing.T) {
 		}
 	}
 
-	for _, tc := range []struct {
+	for _, test := range []struct {
 		name, query    string
 		modules        []*internal.Module
 		wantSearchPage *SearchPage
@@ -149,19 +149,20 @@ func TestFetchSearchPage(t *testing.T) {
 			},
 		},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			got, err := fetchSearchPage(ctx, testDB, tc.query, paginationParams{limit: 20, page: 1})
+		t.Run(test.name, func(t *testing.T) {
+			got, err := fetchSearchPage(ctx, testDB, test.query, paginationParams{limit: 20, page: 1})
 			if err != nil {
-				t.Fatalf("fetchSearchPage(db, %q): %v", tc.query, err)
+				t.Fatalf("fetchSearchPage(db, %q): %v", test.query, err)
 			}
 
 			opts := cmp.Options{
 				cmp.AllowUnexported(SearchPage{}, pagination{}),
 				cmpopts.IgnoreFields(licenses.Metadata{}, "FilePath"),
 				cmpopts.IgnoreFields(pagination{}, "Approximate"),
+				cmpopts.IgnoreFields(basePage{}, "MetaDescription"),
 			}
-			if diff := cmp.Diff(tc.wantSearchPage, got, opts...); diff != "" {
-				t.Errorf("fetchSearchPage(db, %q) mismatch (-want +got):\n%s", tc.query, diff)
+			if diff := cmp.Diff(test.wantSearchPage, got, opts...); diff != "" {
+				t.Errorf("fetchSearchPage(db, %q) mismatch (-want +got):\n%s", test.query, diff)
 			}
 		})
 	}
@@ -208,12 +209,12 @@ func TestSearchRequestRedirectPath(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	for _, tc := range []struct {
+	for _, test := range []struct {
 		name  string
 		query string
 		want  string
 	}{
-		{"module", "golang.org/x/tools", "/mod/golang.org/x/tools"},
+		{"module", "golang.org/x/tools", "/golang.org/x/tools"},
 		{"directory", "golang.org/x/tools/internal", "/golang.org/x/tools/internal"},
 		{"package", "golang.org/x/tools/internal/lsp", "/golang.org/x/tools/internal/lsp"},
 		{"stdlib package does not redirect", "errors", ""},
@@ -221,11 +222,11 @@ func TestSearchRequestRedirectPath(t *testing.T) {
 		{"stdlib directory does redirect", "cmd/go/internal", "/cmd/go/internal"},
 		{"std does not redirect", "std", ""},
 		{"non-existent path does not redirect", "github.com/non-existent", ""},
-		{"trim URL scheme from query", "https://golang.org/x/tools", "/mod/golang.org/x/tools"},
+		{"trim URL scheme from query", "https://golang.org/x/tools", "/golang.org/x/tools"},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := searchRequestRedirectPath(ctx, testDB, tc.query); got != tc.want {
-				t.Errorf("searchRequestRedirectPath(ctx, %q) = %q; want = %q", tc.query, got, tc.want)
+		t.Run(test.name, func(t *testing.T) {
+			if got := searchRequestRedirectPath(ctx, testDB, test.query); got != test.want {
+				t.Errorf("searchRequestRedirectPath(ctx, %q) = %q; want = %q", test.query, got, test.want)
 			}
 		})
 	}
@@ -270,12 +271,12 @@ func TestElapsedTime(t *testing.T) {
 		},
 	}
 
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			elapsedTime := elapsedTime(tc.date)
+	for _, test := range testCases {
+		t.Run(test.name, func(t *testing.T) {
+			elapsedTime := elapsedTime(test.date)
 
-			if elapsedTime != tc.elapsedTime {
-				t.Errorf("elapsedTime(%q) = %s, want %s", tc.date, elapsedTime, tc.elapsedTime)
+			if elapsedTime != test.elapsedTime {
+				t.Errorf("elapsedTime(%q) = %s, want %s", test.date, elapsedTime, test.elapsedTime)
 			}
 		})
 	}

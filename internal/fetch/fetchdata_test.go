@@ -8,9 +8,9 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/google/safehtml/testconversions"
 	"golang.org/x/pkgsite/internal"
 	"golang.org/x/pkgsite/internal/derrors"
+	"golang.org/x/pkgsite/internal/godoc"
 	"golang.org/x/pkgsite/internal/proxy"
 	"golang.org/x/pkgsite/internal/source"
 	"golang.org/x/pkgsite/internal/stdlib"
@@ -18,8 +18,9 @@ import (
 )
 
 type testModule struct {
-	mod *proxy.Module
-	fr  *FetchResult
+	mod        *proxy.Module
+	fr         *FetchResult
+	docStrings map[string][]string
 }
 
 var moduleOnePackage = &testModule{
@@ -61,8 +62,6 @@ var moduleOnePackage = &testModule{
 		},
 	},
 }
-
-var html = testconversions.MakeHTMLForTest
 
 var moduleMultiPackage = &testModule{
 	mod: &proxy.Module{
@@ -126,7 +125,6 @@ var moduleMultiPackage = &testModule{
 					},
 					Documentation: &internal.Documentation{
 						Synopsis: "package bar",
-						HTML:     html("Bar returns the string &#34;bar&#34;."),
 					},
 				},
 				{
@@ -136,12 +134,15 @@ var moduleMultiPackage = &testModule{
 					},
 					Documentation: &internal.Documentation{
 						Synopsis: "package foo",
-						HTML:     html("FooBar returns the string &#34;foo bar&#34;."),
 					},
 					Imports: []string{"fmt", "github.com/my/module/bar"},
 				},
 			},
 		},
+	},
+	docStrings: map[string][]string{
+		"github.com/my/module/bar": {"Bar returns the string &#34;bar&#34;."},
+		"github.com/my/module/foo": {"FooBar returns the string &#34;foo bar&#34;."},
 	},
 }
 
@@ -178,11 +179,13 @@ var moduleNoGoMod = &testModule{
 					},
 					Documentation: &internal.Documentation{
 						Synopsis: "Package p is inside a module where a go.mod file hasn't been explicitly added yet.",
-						HTML:     html("const Year = 2009"),
 					},
 				},
 			},
 		},
+	},
+	docStrings: map[string][]string{
+		"no.mod/module/p": {"const Year = 2009"},
 	},
 }
 
@@ -239,7 +242,6 @@ var moduleBadPackages = &testModule{
 					},
 					Documentation: &internal.Documentation{
 						Synopsis: "Package good is inside a module that has bad packages.",
-						HTML:     html(`const Good = <a href="/builtin#true">true</a>`),
 					},
 				},
 			},
@@ -264,6 +266,9 @@ var moduleBadPackages = &testModule{
 				Status:      600,
 			},
 		},
+	},
+	docStrings: map[string][]string{
+		"bad.mod/module/good": {`const Good = <a href="/builtin#true">true</a>`},
 	},
 }
 
@@ -302,7 +307,6 @@ var moduleBuildConstraints = &testModule{
 					},
 					Documentation: &internal.Documentation{
 						Synopsis: "Package cpu implements processor feature detection used by the Go standard library.",
-						HTML:     html("const CacheLinePadSize = 3"),
 					},
 				},
 			},
@@ -321,6 +325,9 @@ var moduleBuildConstraints = &testModule{
 				Status:      derrors.ToStatus(derrors.PackageBuildContextNotSupported),
 			},
 		},
+	},
+	docStrings: map[string][]string{
+		"build.constraints/module/cpu": {"const CacheLinePadSize = 3"},
 	},
 }
 
@@ -391,7 +398,6 @@ var moduleNonRedist = &testModule{
 					},
 					Documentation: &internal.Documentation{
 						Synopsis: "package bar",
-						HTML:     html("Bar returns the string"),
 					},
 				},
 				{
@@ -401,7 +407,6 @@ var moduleNonRedist = &testModule{
 					},
 					Documentation: &internal.Documentation{
 						Synopsis: "package baz",
-						HTML:     html("Baz returns the string"),
 					},
 				},
 				{
@@ -415,12 +420,16 @@ var moduleNonRedist = &testModule{
 					},
 					Documentation: &internal.Documentation{
 						Synopsis: "package foo",
-						HTML:     html("FooBar returns the string"),
 					},
 					Imports: []string{"fmt", "github.com/my/module/bar"},
 				},
 			},
 		},
+	},
+	docStrings: map[string][]string{
+		"nonredistributable.mod/module/bar":     {"Bar returns the string"},
+		"nonredistributable.mod/module/bar/baz": {"Baz returns the string"},
+		"nonredistributable.mod/module/foo":     {"FooBar returns the string"},
 	},
 }
 
@@ -519,10 +528,15 @@ var moduleDocTest = &testModule{
 					},
 					Documentation: &internal.Documentation{
 						Synopsis: "Package permalink is for testing the heading permalink documentation rendering feature.",
-						HTML:     html("<h3 id=\"hdr-This_is_a_heading\">This is a heading<a href=\"#hdr-This_is_a_heading\">¶</a></h3>"),
 					},
 				},
 			},
+		},
+	},
+	docStrings: map[string][]string{
+		"doc.test/permalink": {
+			"<h4 id=\"hdr-This_is_a_heading\">This is a heading <a",
+			"href=\"#hdr-This_is_a_heading\">¶</a></h4>",
 		},
 	},
 }
@@ -553,7 +567,6 @@ var moduleDocTooLarge = &testModule{
 					},
 					Documentation: &internal.Documentation{
 						Synopsis: "This documentation is big.",
-						HTML:     html(docTooLargeReplacement),
 					},
 				},
 			},
@@ -566,6 +579,9 @@ var moduleDocTooLarge = &testModule{
 				Status:      derrors.ToStatus(derrors.PackageDocumentationHTMLTooLarge),
 			},
 		},
+	},
+	docStrings: map[string][]string{
+		"bigdoc.test": {godoc.DocTooLargeReplacement},
 	},
 }
 
@@ -638,7 +654,7 @@ var moduleStd = &testModule{
 				Version:    "v1.12.5",
 				CommitTime: stdlib.TestCommitTime,
 				HasGoMod:   true,
-				SourceInfo: source.NewGitHubInfo("https://github.com/golang/go", "src", "go1.12.5"),
+				SourceInfo: source.NewStdlibInfo("v1.12.5"),
 			},
 			Units: []*internal.Unit{
 				{
@@ -843,7 +859,6 @@ var moduleLatest = &testModule{
 // of substrings that should appear in the generated documentation.
 // The substrings are separated by a '~' character.
 func moduleWithExamples(path, source, test string, docSubstrings ...string) *testModule {
-	docHTML := html(strings.Join(docSubstrings, " ~ "))
 	return &testModule{
 		mod: &proxy.Module{
 			ModulePath: path,
@@ -878,11 +893,13 @@ package example_test
 						},
 						Documentation: &internal.Documentation{
 							Synopsis: "Package example contains examples.",
-							HTML:     docHTML,
 						},
 					},
 				},
 			},
+		},
+		docStrings: map[string][]string{
+			path + "/example": docSubstrings,
 		},
 	}
 }

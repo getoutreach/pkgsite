@@ -16,6 +16,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/Masterminds/squirrel"
 	"github.com/lib/pq"
 	"go.opencensus.io/trace"
 	"golang.org/x/mod/module"
@@ -23,6 +24,7 @@ import (
 	"golang.org/x/pkgsite/internal"
 	"golang.org/x/pkgsite/internal/database"
 	"golang.org/x/pkgsite/internal/derrors"
+	"golang.org/x/pkgsite/internal/licenses"
 	"golang.org/x/pkgsite/internal/log"
 	"golang.org/x/pkgsite/internal/stdlib"
 	"golang.org/x/pkgsite/internal/version"
@@ -51,9 +53,6 @@ func (db *DB) InsertModule(ctx context.Context, m *internal.Module) (err error) 
 	// inserted. Rows that currently exist should not be missing from the
 	// new module. We want to be sure that we will overwrite every row that
 	// pertains to the module.
-	if err := db.compareLicenses(ctx, m); err != nil {
-		return err
-	}
 	if err := db.comparePaths(ctx, m); err != nil {
 		return err
 	}
@@ -79,6 +78,13 @@ func (db *DB) saveModule(ctx context.Context, m *internal.Module) (err error) {
 	return db.db.Transact(ctx, sql.LevelDefault, func(tx *database.DB) error {
 		moduleID, err := insertModule(ctx, tx, m)
 		if err != nil {
+			return err
+		}
+		// Compare existing data from the database, and the module to be
+		// inserted. Rows that currently exist should not be missing from the
+		// new module. We want to be sure that we will overwrite every row that
+		// pertains to the module.
+		if err := db.compareLicenses(ctx, moduleID, m.Licenses); err != nil {
 			return err
 		}
 		if err := insertLicenses(ctx, tx, m, moduleID); err != nil {
@@ -205,13 +211,12 @@ func insertLicenses(ctx context.Context, db *database.DB, m *internal.Module, mo
 		if err != nil {
 			return fmt.Errorf("marshalling %+v: %v", l.Coverage, err)
 		}
-		licenseValues = append(licenseValues, m.ModulePath, m.Version,
-			l.FilePath, makeValidUnicode(string(l.Contents)), pq.Array(l.Types), covJSON, moduleID)
+		licenseValues = append(licenseValues, l.FilePath,
+			makeValidUnicode(string(l.Contents)), pq.Array(l.Types), covJSON,
+			moduleID)
 	}
 	if len(licenseValues) > 0 {
 		licenseCols := []string{
-			"module_path",
-			"version",
 			"file_path",
 			"contents",
 			"types",
@@ -261,10 +266,9 @@ func (pdb *DB) insertUnits(ctx context.Context, db *database.DB, m *internal.Mod
 	ctx, span := trace.StartSpan(ctx, "insertUnits")
 	defer span.End()
 
-	// Sort to ensure proper lock ordering, avoiding deadlocks. See
-	// b/141164828#comment8. We have seen deadlocks on package_imports and
-	// documentation.  They can occur when processing two versions of the
-	// same module, which happens regularly.
+	// Sort to ensure proper lock ordering, avoiding deadlocks. We have seen
+	// deadlocks on package_imports and documentation. They can occur when
+	// processing two versions of the same module, which happens regularly.
 	sort.Slice(m.Units, func(i, j int) bool {
 		return m.Units[i].Path < m.Units[j].Path
 	})
@@ -272,17 +276,10 @@ func (pdb *DB) insertUnits(ctx context.Context, db *database.DB, m *internal.Mod
 		sort.Strings(u.Imports)
 	}
 
-	var pathValues []interface{}
-	for _, u := range m.Units {
-		pathValues = append(pathValues, u.Path)
-	}
-	// Insert data into the paths table.
-	pathCols := []string{"path"}
-	uniquePathCols := []string{"path"}
-	returningPathCols := []string{"id", "path"}
-
+	// Add new unit paths to the paths table.
 	pathToID := map[string]int{}
-	if err := db.BulkUpsertReturning(ctx, "paths", pathCols, pathValues, uniquePathCols, returningPathCols, func(rows *sql.Rows) error {
+
+	collect := func(rows *sql.Rows) error {
 		var (
 			pathID int
 			path   string
@@ -292,8 +289,37 @@ func (pdb *DB) insertUnits(ctx context.Context, db *database.DB, m *internal.Mod
 		}
 		pathToID[path] = pathID
 		return nil
-	}); err != nil {
+	}
+
+	// Read all existing paths for this module, to avoid a large bulk upsert.
+	// (We've seen these bulk upserts hang for so long that they time out (10
+	// minutes)).
+	var curPaths []string
+	for _, u := range m.Units {
+		curPaths = append(curPaths, u.Path)
+	}
+	if err := db.RunQuery(ctx, `SELECT id, path FROM paths WHERE path = ANY($1)`,
+		collect, pq.Array(curPaths)); err != nil {
 		return err
+	}
+
+	log.Debugf(ctx, "insertUnits(%q): read %d paths", m.ModulePath, len(pathToID))
+	// Insert any unit paths that we don't already have.
+	var pathValues []interface{}
+	for _, u := range m.Units {
+		if _, ok := pathToID[u.Path]; !ok {
+			pathValues = append(pathValues, u.Path)
+		}
+	}
+	if len(pathValues) > 0 {
+		log.Debugf(ctx, "insertUnits(%q): upserting %d paths", m.ModulePath, len(pathValues))
+		// Insert data into the paths table.
+		pathCols := []string{"path"}
+		uniquePathCols := []string{"path"}
+		returningPathCols := []string{"id", "path"}
+		if err := db.BulkUpsertReturning(ctx, "paths", pathCols, pathValues, uniquePathCols, returningPathCols, collect); err != nil {
+			return err
+		}
 	}
 
 	var (
@@ -333,13 +359,8 @@ func (pdb *DB) insertUnits(ctx context.Context, db *database.DB, m *internal.Mod
 		if u.Readme != nil {
 			pathToReadme[u.Path] = u.Readme
 		}
-		if u.Documentation != nil && u.Documentation.HTML.String() == internal.StringFieldMissing {
-			return errors.New("insertUnits: package missing Documentation.HTML")
-		}
-		if u.Documentation != nil {
-			if u.Documentation.Source == nil {
-				return fmt.Errorf("insertUnits: unit %q missing source files", u.Path)
-			}
+		if u.Documentation != nil && u.Documentation.Source == nil {
+			return fmt.Errorf("insertUnits: unit %q missing source files", u.Path)
 		}
 		pathToDoc[u.Path] = u.Documentation
 		if len(u.Imports) > 0 {
@@ -377,10 +398,9 @@ func (pdb *DB) insertUnits(ctx context.Context, db *database.DB, m *internal.Mod
 		return err
 	}
 
-	// Sort to ensure proper lock ordering, avoiding deadlocks. See
-	// b/141164828#comment8. We have seen deadlocks on package_imports and
-	// documentation.  They can occur when processing two versions of the
-	// same module, which happens regularly.
+	// Sort to ensure proper lock ordering, avoiding deadlocks. We have seen
+	// deadlocks on package_imports and documentation. They can occur when
+	// processing two versions of the same module, which happens regularly.
 	sort.Strings(paths)
 	if len(pathToReadme) > 0 {
 		var readmeValues []interface{}
@@ -413,10 +433,10 @@ func (pdb *DB) insertUnits(ctx context.Context, db *database.DB, m *internal.Mod
 				continue
 			}
 			unitID := pathToUnitID[path]
-			docValues = append(docValues, unitID, doc.GOOS, doc.GOARCH, doc.Synopsis, makeValidUnicode(doc.HTML.String()), doc.Source)
+			docValues = append(docValues, unitID, doc.GOOS, doc.GOARCH, doc.Synopsis, doc.Source)
 		}
 		uniqueCols := []string{"unit_id", "goos", "goarch"}
-		docCols := append(uniqueCols, "synopsis", "html", "source")
+		docCols := append(uniqueCols, "synopsis", "source")
 		if err := db.BulkUpsert(ctx, "documentation", docCols, docValues, uniqueCols); err != nil {
 			return err
 		}
@@ -475,15 +495,18 @@ func isIncompatible(version string) bool {
 }
 
 // isLatestVersion reports whether version is the latest version of the module.
-func isLatestVersion(ctx context.Context, db *database.DB, modulePath, resolvedVersion string) (_ bool, err error) {
+func isLatestVersion(ctx context.Context, ddb *database.DB, modulePath, resolvedVersion string) (_ bool, err error) {
 	defer derrors.Wrap(&err, "isLatestVersion(ctx, tx, %q)", modulePath)
 
-	query := fmt.Sprintf(`
-		SELECT version FROM modules m WHERE m.module_path = $1
-		%s
-		LIMIT 1`, orderByLatest)
-
-	row := db.QueryRow(ctx, query, modulePath)
+	q, args, err := orderByLatest(squirrel.Select("m.version").
+		From("modules m").
+		Where(squirrel.Eq{"m.module_path": modulePath})).
+		Limit(1).
+		ToSql()
+	if err != nil {
+		return false, err
+	}
+	row := ddb.QueryRow(ctx, q, args...)
 	var v string
 	if err := row.Scan(&v); err != nil {
 		if err == sql.ErrNoRows {
@@ -539,15 +562,15 @@ func validateModule(m *internal.Module) (err error) {
 // compareLicenses compares m.Licenses with the existing licenses for
 // m.ModulePath and m.Version in the database. It returns an error if there
 // are licenses in the licenses table that are not present in m.Licenses.
-func (db *DB) compareLicenses(ctx context.Context, m *internal.Module) (err error) {
-	defer derrors.Wrap(&err, "compareLicenses(ctx, %q, %q)", m.ModulePath, m.Version)
-	dbLicenses, err := db.getModuleLicenses(ctx, m.ModulePath, m.Version)
+func (db *DB) compareLicenses(ctx context.Context, moduleID int, lics []*licenses.License) (err error) {
+	defer derrors.Wrap(&err, "compareLicenses(ctx, %d)", moduleID)
+	dbLicenses, err := db.getModuleLicenses(ctx, moduleID)
 	if err != nil {
 		return err
 	}
 
 	set := map[string]bool{}
-	for _, l := range m.Licenses {
+	for _, l := range lics {
 		set[l.FilePath] = true
 	}
 	for _, l := range dbLicenses {

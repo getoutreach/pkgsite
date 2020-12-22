@@ -36,7 +36,7 @@ func TestUnitURLPath(t *testing.T) {
 			"/math@go1.2.3",
 		},
 	} {
-		got := unitURLPath(&internal.UnitMeta{Path: test.path, ModulePath: test.modpath}, test.version)
+		got := constructUnitURL(test.path, test.modpath, test.version)
 		if got != test.want {
 			t.Errorf("unitURLPath(%q, %q, %q) = %q, want %q", test.path, test.modpath, test.version, got, test.want)
 		}
@@ -76,7 +76,6 @@ func TestCanonicalURLPath(t *testing.T) {
 
 func TestIsValidTab(t *testing.T) {
 	testTabs := []string{
-		"invalidTab",
 		tabMain,
 		tabVersions,
 		tabImports,
@@ -120,12 +119,36 @@ func TestIsValidTab(t *testing.T) {
 		}
 		for _, tab := range testTabs {
 			t.Run(test.name, func(t *testing.T) {
-				got := isValidTab(tab, test.um)
+				got := isValidTabForUnit(tab, test.um)
 				_, want := validTabs[tab]
 				if got != want {
 					t.Errorf("mismatch for %q on tab %q: got %t; want %t", test.um.Path, tab, got, want)
 				}
 			})
+		}
+	}
+}
+
+func TestMetaDescription(t *testing.T) {
+	for _, test := range []struct {
+		synopsis, want string
+	}{
+		{
+			synopsis: "",
+			want:     "",
+		},
+		{
+			synopsis: "Hello, world.",
+			want:     `<meta name="Description" content="Hello, world.">`,
+		},
+		{
+			synopsis: `"><script>alert();</script><br`,
+			want:     `<meta name="Description" content="&#34;&gt;&lt;script&gt;alert();&lt;/script&gt;&lt;br">`,
+		},
+	} {
+		got := metaDescription(test.synopsis).String()
+		if got != test.want {
+			t.Errorf("metaDescription(%q) = %q, want %q", test.synopsis, got, test.want)
 		}
 	}
 }

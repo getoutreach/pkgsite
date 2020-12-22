@@ -7,7 +7,6 @@ package internal
 import (
 	"time"
 
-	"github.com/google/safehtml"
 	"golang.org/x/pkgsite/internal/licenses"
 	"golang.org/x/pkgsite/internal/source"
 )
@@ -27,6 +26,7 @@ type UnitMeta struct {
 	ModulePath string
 	CommitTime time.Time
 	SourceInfo *source.Info
+	HasGoMod   bool
 }
 
 // IsPackage reports whether the path represents a package path.
@@ -67,7 +67,6 @@ type Documentation struct {
 	GOOS     string
 	GOARCH   string
 	Synopsis string
-	HTML     safehtml.HTML
 	Source   []byte // encoded ast.Files; see godoc.Package.Encode
 }
 
@@ -110,9 +109,7 @@ const StringFieldMissing = "!MISSING"
 
 // FieldSet bits for fields that can be conditionally read from the data store.
 const (
-	WithReadme FieldSet = 1 << iota
-	WithDocumentation
+	WithMain FieldSet = 1 << iota
 	WithImports
 	WithLicenses
-	WithSubdirectories
 )

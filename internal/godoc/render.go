@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/safehtml"
 	"github.com/google/safehtml/template"
+	"golang.org/x/pkgsite/internal"
 	"golang.org/x/pkgsite/internal/derrors"
 	"golang.org/x/pkgsite/internal/godoc/dochtml"
 	"golang.org/x/pkgsite/internal/godoc/internal/doc"
@@ -22,9 +23,11 @@ import (
 )
 
 const (
-	megabyte               = 1000 * 1000
-	maxImportsPerPackage   = 1000
-	docTooLargeReplacement = `<p>Documentation is too large to display.</p>`
+	megabyte             = 1000 * 1000
+	maxImportsPerPackage = 1000
+
+	// Exported for tests.
+	DocTooLargeReplacement = `<p>Documentation is too large to display.</p>`
 )
 
 // MaxDocumentationHTML is a limit on the rendered documentation HTML size.
@@ -66,7 +69,7 @@ func (p *Package) Render(ctx context.Context, innerPath string, sourceInfo *sour
 	opts := p.renderOptions(innerPath, sourceInfo, modInfo)
 	docHTML, err := dochtml.Render(ctx, p.Fset, d, opts)
 	if errors.Is(err, ErrTooLarge) {
-		docHTML = template.MustParseAndExecuteToHTML(docTooLargeReplacement)
+		docHTML = template.MustParseAndExecuteToHTML(DocTooLargeReplacement)
 	} else if err != nil {
 		return "", nil, safehtml.HTML{}, fmt.Errorf("dochtml.Render: %v", err)
 	}
@@ -156,20 +159,41 @@ func (p *Package) renderOptions(innerPath string, sourceInfo *source.Info, modIn
 
 // RenderParts renders the documentation for the package in parts.
 // Rendering destroys p's AST; do not call any methods of p after it returns.
-func (p *Package) RenderParts(ctx context.Context, innerPath string, sourceInfo *source.Info, modInfo *ModuleInfo) (body, outline, mobileOutline safehtml.HTML, err error) {
+func (p *Package) RenderParts(ctx context.Context, innerPath string, sourceInfo *source.Info, modInfo *ModuleInfo) (_ *dochtml.Parts, err error) {
 	p.renderCalled = true
 
 	d, err := p.docPackage(innerPath, modInfo)
 	if err != nil {
-		return safehtml.HTML{}, safehtml.HTML{}, safehtml.HTML{}, err
+		return nil, err
 	}
 	opts := p.renderOptions(innerPath, sourceInfo, modInfo)
-	b, o, m, err := dochtml.RenderParts(ctx, p.Fset, d, opts)
+	parts, err := dochtml.RenderParts(ctx, p.Fset, d, opts)
 	if errors.Is(err, ErrTooLarge) {
-		return template.MustParseAndExecuteToHTML(docTooLargeReplacement), safehtml.HTML{}, safehtml.HTML{}, err
+		return &dochtml.Parts{Body: template.MustParseAndExecuteToHTML(DocTooLargeReplacement)}, nil
 	}
 	if err != nil {
-		return safehtml.HTML{}, safehtml.HTML{}, safehtml.HTML{}, fmt.Errorf("dochtml.Render: %v", err)
+		return nil, fmt.Errorf("dochtml.Render: %v", err)
 	}
-	return b, o, m, nil
+	return parts, nil
+}
+
+// RenderPartsFromUnit is a convenience function that first decodes the source
+// in the unit, which must exist, and then calls RenderParts.
+func RenderPartsFromUnit(ctx context.Context, u *internal.Unit) (_ *dochtml.Parts, err error) {
+	docPkg, err := DecodePackage(u.Documentation.Source)
+	if err != nil {
+		return nil, err
+	}
+	modInfo := &ModuleInfo{
+		ModulePath:      u.ModulePath,
+		ResolvedVersion: u.Version,
+		ModulePackages:  nil, // will be provided by docPkg
+	}
+	var innerPath string
+	if u.ModulePath == stdlib.ModulePath {
+		innerPath = u.Path
+	} else if u.Path != u.ModulePath {
+		innerPath = u.Path[len(u.ModulePath)+1:]
+	}
+	return docPkg.RenderParts(ctx, innerPath, u.SourceInfo, modInfo)
 }

@@ -174,7 +174,7 @@ func (s *Server) serveSearch(w http.ResponseWriter, r *http.Request, ds internal
 	if err != nil {
 		return fmt.Errorf("fetchSearchPage(ctx, db, %q): %v", query, err)
 	}
-	page.basePage = s.newBasePage(r, query)
+	page.basePage = s.newBasePage(r, fmt.Sprintf("%s - Search Results", query))
 	s.servePage(ctx, w, "search.tmpl", page)
 	return nil
 }
@@ -194,17 +194,14 @@ func searchRequestRedirectPath(ctx context.Context, ds internal.DataSource, quer
 	if !strings.Contains(requestedPath, "/") {
 		return ""
 	}
-	um, err := ds.GetUnitMeta(ctx, requestedPath, internal.UnknownModulePath, internal.LatestVersion)
+	_, err := ds.GetUnitMeta(ctx, requestedPath, internal.UnknownModulePath, internal.LatestVersion)
 	if err != nil {
 		if !errors.Is(err, derrors.NotFound) {
 			log.Errorf(ctx, "searchRequestRedirectPath(%q): %v", requestedPath, err)
 		}
 		return ""
 	}
-	if um.IsPackage() || um.ModulePath != requestedPath {
-		return fmt.Sprintf("/%s", requestedPath)
-	}
-	return fmt.Sprintf("/mod/%s", requestedPath)
+	return fmt.Sprintf("/%s", requestedPath)
 }
 
 // searchQuery extracts a search query from the request.

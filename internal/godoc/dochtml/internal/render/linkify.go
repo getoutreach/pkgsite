@@ -75,36 +75,79 @@ type docElement struct {
 	ID    safehtml.Identifier
 }
 
-func (r *Renderer) declHTML(doc string, decl ast.Decl) (out struct{ Doc, Decl safehtml.HTML }) {
+func (r *Renderer) declHTML(doc string, decl ast.Decl, extractLinks bool) (out struct{ Doc, Decl safehtml.HTML }) {
 	dids := newDeclIDs(decl)
 	idr := &identifierResolver{r.pids, dids, r.packageURL}
 	if doc != "" {
 		var els []docElement
+		inLinks := false
 		for _, blk := range docToBlocks(doc) {
 			var el docElement
 			switch blk := blk.(type) {
 			case *paragraph:
-				el.Body = r.linesToHTML(blk.lines, idr)
+				if inLinks {
+					r.links = append(r.links, parseLinks(blk.lines)...)
+				} else {
+					el.Body = r.linesToHTML(blk.lines, idr)
+					els = append(els, el)
+				}
 			case *preformat:
-				el.IsPreformat = true
-				el.Body = r.linesToHTML(blk.lines, nil)
+				if inLinks {
+					r.links = append(r.links, parseLinks(blk.lines)...)
+				} else {
+					el.IsPreformat = true
+					el.Body = r.linesToHTML(blk.lines, nil)
+					els = append(els, el)
+				}
 			case *heading:
-				el.IsHeading = true
-				el.Title = blk.title
-				id := badAnchorRx.ReplaceAllString(blk.title, "_")
-				el.ID = safehtml.IdentifierFromConstantPrefix("hdr", id)
+				if extractLinks && blk.title == "Links" {
+					inLinks = true
+				} else {
+					inLinks = false
+					el.IsHeading = true
+					el.Title = blk.title
+					id := badAnchorRx.ReplaceAllString(blk.title, "_")
+					el.ID = safehtml.IdentifierFromConstantPrefix("hdr", id)
+					els = append(els, el)
+				}
 			}
-			els = append(els, el)
 		}
 		out.Doc = ExecuteToHTML(r.docTmpl, docData{Elements: els, DisablePermalinks: r.disablePermalinks})
 	}
 	if decl != nil {
-		out.Decl = safehtml.HTMLConcat(
-			template.MustParseAndExecuteToHTML("<pre>\n"),
-			r.formatDeclHTML(decl, idr),
-			template.MustParseAndExecuteToHTML("</pre>\n"))
+		out.Decl = r.formatDeclHTML(decl, idr)
 	}
 	return out
+}
+
+// parseLinks extracts links from lines.
+func parseLinks(lines []string) []Link {
+	var links []Link
+	for _, l := range lines {
+		if link := parseLink(l); link != nil {
+			links = append(links, *link)
+		}
+	}
+	return links
+}
+
+// If line is of the form "- title, url", then parseLink returns
+// a Link with the title and url. Otherwise it returns nil.
+// The line already has leading whitespace trimmed.
+func parseLink(line string) *Link {
+	if !strings.HasPrefix(line, "- ") && !strings.HasPrefix(line, "-\t") {
+		return nil
+	}
+	parts := strings.SplitN(line[2:], ",", 2)
+	if len(parts) != 2 {
+		return nil
+	}
+	text := strings.TrimSpace(parts[0])
+	href := strings.TrimSpace(parts[1])
+	return &Link{
+		Text: text,
+		Href: href,
+	}
 }
 
 func (r *Renderer) linesToHTML(lines []string, idr *identifierResolver) safehtml.HTML {
@@ -333,7 +376,8 @@ func (r *Renderer) formatDeclHTML(decl ast.Decl, idr *identifierResolver) safeht
 		return true
 	})
 
-	// Trim large string literals and slices.
+	// Trim large string literals and composite literals.
+	//ast.Fprint(os.Stdout, nil, decl, nil)
 	v := &declVisitor{}
 	ast.Walk(v, decl)
 
@@ -438,35 +482,67 @@ scan:
 
 var anchorTemplate = template.Must(template.New("anchor").Parse(`<span id="{{.ID}}" data-kind="{{.Kind}}"></span>`))
 
-// declVisitor is used to walk over the AST and trim large string
-// literals and arrays before package documentation is rendered.
-// Comments are added to Comments to indicate that a part of the
-// original code is not displayed.
+// declVisitor is an ast.Visitor that trims
+// large string literals and composite literals.
 type declVisitor struct {
+	// Comments is a collection of existing documentation in the ast.Decl,
+	// with additional comments to indicate when a part of the original
+	// code is not displayed.
 	Comments []*ast.CommentGroup
+}
+
+type afterVisitor struct {
+	v ast.Visitor
+	f func()
+}
+
+func (v *afterVisitor) Visit(n ast.Node) ast.Visitor {
+	if n == nil {
+		v.f()
+	}
+	return v.v
 }
 
 // Visit implements ast.Visitor.
 func (v *declVisitor) Visit(n ast.Node) ast.Visitor {
+
+	addComment := func(pos token.Pos, text string) {
+		v.Comments = append(v.Comments,
+			&ast.CommentGroup{List: []*ast.Comment{{
+				Slash: pos,
+				Text:  text,
+			}}})
+	}
+
 	switch n := n.(type) {
 	case *ast.BasicLit:
 		if n.Kind == token.STRING && len(n.Value) > 128 {
-			v.Comments = append(v.Comments,
-				&ast.CommentGroup{List: []*ast.Comment{{
-					Slash: n.Pos(),
-					Text:  stringBasicLitSize(n.Value),
-				}}})
+			addComment(n.Pos(), stringBasicLitSize(n.Value))
 			n.Value = `""`
 		}
 	case *ast.CompositeLit:
 		if len(n.Elts) > 100 {
-			v.Comments = append(v.Comments,
-				&ast.CommentGroup{List: []*ast.Comment{{
-					Slash: n.Lbrace,
-					Text:  fmt.Sprintf("/* %d elements not displayed */", len(n.Elts)),
-				}}})
+			addComment(n.Lbrace, fmt.Sprintf("/* %d elements not displayed */", len(n.Elts)))
 			n.Elts = n.Elts[:0]
 		}
+
+	case *ast.StructType:
+		if n.Incomplete && n.Fields != nil {
+			return &afterVisitor{v, func() {
+				addComment(n.Fields.Closing-1, "// contains filtered or unexported fields")
+			}}
+		}
+
+	case *ast.InterfaceType:
+		if n.Incomplete && n.Methods != nil {
+			return &afterVisitor{v, func() {
+				addComment(n.Methods.Closing-1, "// contains filtered or unexported methods")
+			}}
+		}
+
+	case *ast.CommentGroup:
+		v.Comments = append(v.Comments, n) // Preserve existing documentation in the ast.Decl.
+		return nil                         // No need to visit individual comments of the comment group.
 	}
 	return v
 }

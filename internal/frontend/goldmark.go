@@ -7,7 +7,12 @@
 package frontend
 
 import (
+	"bytes"
+	"context"
 	"fmt"
+	"regexp"
+	"strings"
+	"unicode"
 
 	"github.com/yuin/goldmark/ast"
 	"github.com/yuin/goldmark/parser"
@@ -16,18 +21,19 @@ import (
 	"github.com/yuin/goldmark/text"
 	"github.com/yuin/goldmark/util"
 	"golang.org/x/pkgsite/internal"
+	"golang.org/x/pkgsite/internal/log"
 	"golang.org/x/pkgsite/internal/source"
 )
 
-// ASTTransformer is a default transformer of the goldmark tree. We pass in
+// astTransformer is a default transformer of the goldmark tree. We pass in
 // readme information to use for the link transformations.
-type ASTTransformer struct {
+type astTransformer struct {
 	info   *source.Info
 	readme *internal.Readme
 }
 
 // Transform transforms the given AST tree.
-func (g *ASTTransformer) Transform(node *ast.Document, reader text.Reader, pc parser.Context) {
+func (g *astTransformer) Transform(node *ast.Document, reader text.Reader, pc parser.Context) {
 	_ = ast.Walk(node, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
 		if !entering {
 			return ast.WalkContinue, nil
@@ -41,18 +47,14 @@ func (g *ASTTransformer) Transform(node *ast.Document, reader text.Reader, pc pa
 			if d := translateRelativeLink(string(v.Destination), g.info, false, g.readme); d != "" {
 				v.Destination = []byte(d)
 			}
-		case *ast.Heading:
-			if id, ok := v.AttributeString("id"); ok {
-				v.SetAttributeString("id", append([]byte("readme-"), id.([]byte)...))
-			}
 		}
 		return ast.WalkContinue, nil
 	})
 }
 
-// HTMLRenderer is a renderer.NodeRenderer implementation that renders
+// htmlRenderer is a renderer.NodeRenderer implementation that renders
 // pkg.go.dev readme features.
-type HTMLRenderer struct {
+type htmlRenderer struct {
 	html.Config
 	info   *source.Info
 	readme *internal.Readme
@@ -61,9 +63,9 @@ type HTMLRenderer struct {
 	offset       int
 }
 
-// NewHTMLRenderer creates a new HTMLRenderer for a readme.
-func NewHTMLRenderer(info *source.Info, readme *internal.Readme, opts ...html.Option) renderer.NodeRenderer {
-	r := &HTMLRenderer{
+// newHTMLRenderer creates a new HTMLRenderer for a readme.
+func newHTMLRenderer(info *source.Info, readme *internal.Readme, opts ...html.Option) renderer.NodeRenderer {
+	r := &htmlRenderer{
 		info:         info,
 		readme:       readme,
 		Config:       html.NewConfig(),
@@ -77,13 +79,13 @@ func NewHTMLRenderer(info *source.Info, readme *internal.Readme, opts ...html.Op
 }
 
 // RegisterFuncs implements renderer.NodeRenderer.RegisterFuncs.
-func (r *HTMLRenderer) RegisterFuncs(reg renderer.NodeRendererFuncRegisterer) {
+func (r *htmlRenderer) RegisterFuncs(reg renderer.NodeRendererFuncRegisterer) {
 	reg.Register(ast.KindHeading, r.renderHeading)
 	reg.Register(ast.KindHTMLBlock, r.renderHTMLBlock)
 	reg.Register(ast.KindRawHTML, r.renderRawHTML)
 }
 
-func (r *HTMLRenderer) renderHeading(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
+func (r *htmlRenderer) renderHeading(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
 	n := node.(*ast.Heading)
 	if r.firstHeading {
 		// The offset ensures the first heading is always an <h3>.
@@ -113,7 +115,7 @@ func (r *HTMLRenderer) renderHeading(w util.BufWriter, source []byte, node ast.N
 
 // renderHTMLBlock is copied directly from the goldmark source code and
 // modified to call translateHTML in every block
-func (r *HTMLRenderer) renderHTMLBlock(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
+func (r *htmlRenderer) renderHTMLBlock(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
 	n := node.(*ast.HTMLBlock)
 	if entering {
 		if r.Unsafe {
@@ -142,7 +144,7 @@ func (r *HTMLRenderer) renderHTMLBlock(w util.BufWriter, source []byte, node ast
 	return ast.WalkContinue, nil
 }
 
-func (r *HTMLRenderer) renderRawHTML(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
+func (r *htmlRenderer) renderRawHTML(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
 	if !entering {
 		return ast.WalkSkipChildren, nil
 	}
@@ -160,4 +162,108 @@ func (r *HTMLRenderer) renderRawHTML(w util.BufWriter, source []byte, node ast.N
 	}
 	_, _ = w.WriteString("<!-- raw HTML omitted -->")
 	return ast.WalkSkipChildren, nil
+}
+
+// ids is a collection of element ids in document.
+type ids struct {
+	values map[string]bool
+}
+
+// newIDs creates a collection of element ids in a document.
+func newIDs() parser.IDs {
+	return &ids{
+		values: map[string]bool{},
+	}
+}
+
+// Generate turns heading content from a markdown document into a heading id.
+// First HTML markup and markdown images are stripped then unicode letters
+// and numbers are used to generate the final result. Finally, all heading ids
+// are prefixed with "readme-" to avoid name collisions with other ids on the
+// unit page. Duplicated heading ids are given an incremental suffix. See
+// readme_test.go for examples.
+func (s *ids) Generate(value []byte, kind ast.NodeKind) []byte {
+	// Matches strings like `<tag attr="value">Text</tag>` or `[![Text](file.svg)](link.html)`.
+	r := regexp.MustCompile(`(<[^<>]+>|\[\!\[[^\]]+]\([^\)]+\)\]\([^\)]+\))`)
+	str := r.ReplaceAllString(string(value), "")
+	f := func(c rune) bool {
+		return !unicode.IsLetter(c) && !unicode.IsNumber(c)
+	}
+	str = strings.Join(strings.FieldsFunc(str, f), "-")
+	str = strings.ToLower(str)
+	if len(str) == 0 {
+		if kind == ast.KindHeading {
+			str = "heading"
+		} else {
+			str = "id"
+		}
+	}
+	key := str
+	for i := 1; ; i++ {
+		if _, ok := s.values[key]; !ok {
+			s.values[key] = true
+			break
+		}
+		key = fmt.Sprintf("%s-%d", str, i)
+	}
+	return []byte("readme-" + key)
+}
+
+// Put implements Put from the goldmark parser IDs interface.
+func (s *ids) Put(value []byte) {
+	s.values[string(value)] = true
+}
+
+type extractLinks struct {
+	inLinksHeading bool
+	links          []link
+}
+
+// The name of the heading from which we extract links.
+const linkHeadingText = "Links"
+
+var linkHeadingBytes = []byte(linkHeadingText) // for faster comparison to node contents
+
+// Transform extracts links from the "Links" section of a README.
+func (e *extractLinks) Transform(node *ast.Document, reader text.Reader, pc parser.Context) {
+	err := ast.Walk(node, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
+		if !entering {
+			return ast.WalkContinue, nil
+		}
+		switch n := n.(type) {
+
+		case *ast.Heading:
+			// We are in the links heading from the point we see a heading with
+			// linkHeadingText until the point we see the next heading.
+			if e.inLinksHeading {
+				return ast.WalkStop, nil
+			}
+			if bytes.Equal(n.Text(reader.Source()), linkHeadingBytes) {
+				e.inLinksHeading = true
+			}
+
+		case *ast.ListItem:
+			// When in the links heading, extract links from list items.
+			if !e.inLinksHeading {
+				return ast.WalkSkipChildren, nil
+			}
+			// We expect the pattern: ListItem -> TextBlock -> Link, with no
+			// other children.
+			if tb, ok := n.FirstChild().(*ast.TextBlock); ok {
+				if l, ok := tb.FirstChild().(*ast.Link); ok && l.NextSibling() == nil {
+					// Record the link.
+					e.links = append(e.links, link{
+						Href: string(l.Destination),
+						Body: string(l.Text(reader.Source())),
+					})
+				}
+			}
+			return ast.WalkSkipChildren, nil
+		}
+
+		return ast.WalkContinue, nil
+	})
+	if err != nil {
+		log.Errorf(context.Background(), "extractLinks.Transform: %v", err)
+	}
 }

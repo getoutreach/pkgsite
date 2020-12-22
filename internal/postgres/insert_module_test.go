@@ -86,12 +86,6 @@ func checkModule(ctx context.Context, t *testing.T, want *internal.Module) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		// TODO(golang/go#38513): remove once we start displaying
-		// READMEs for directories instead of the top-level module.
-		wantu.Readme = &internal.Readme{
-			Filepath: sample.ReadmeFilePath,
-			Contents: sample.ReadmeContents,
-		}
 		wantu.LicenseContents = sample.Licenses
 		var subdirectories []*internal.PackageMeta
 		for _, u := range want.Units {
@@ -124,18 +118,18 @@ func TestInsertModuleLicenseCheck(t *testing.T) {
 			} else {
 				db = testDB
 			}
-			checkHasRedistData := func(readme string, doc safehtml.HTML, want bool) {
+			checkHasRedistData := func(readme string, doc []byte, want bool) {
 				t.Helper()
 				if got := readme != ""; got != want {
 					t.Errorf("readme: got %t, want %t", got, want)
 				}
-				if got := doc.String() != ""; got != want {
+				if got := doc != nil; got != want {
 					t.Errorf("doc: got %t, want %t", got, want)
 				}
 			}
 
 			mod := sample.Module(sample.ModulePath, sample.VersionString, "")
-			checkHasRedistData(mod.Units[0].Readme.Contents, mod.Units[0].Documentation.HTML, true)
+			checkHasRedistData(mod.Units[0].Readme.Contents, mod.Units[0].Documentation.Source, true)
 			mod.IsRedistributable = false
 			mod.Units[0].IsRedistributable = false
 
@@ -153,15 +147,17 @@ func TestInsertModuleLicenseCheck(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			var readme string
+			var (
+				source []byte
+				readme string
+			)
 			if u.Readme != nil {
 				readme = u.Readme.Contents
 			}
-			var doc safehtml.HTML
 			if u.Documentation != nil {
-				doc = u.Documentation.HTML
+				source = u.Documentation.Source
 			}
-			checkHasRedistData(readme, doc, bypass)
+			checkHasRedistData(readme, source, bypass)
 		})
 	}
 }
@@ -179,9 +175,7 @@ func TestUpsertModule(t *testing.T) {
 	// Change the module, and re-insert.
 	m.IsRedistributable = !m.IsRedistributable
 	m.Licenses[0].Contents = append(m.Licenses[0].Contents, " and more"...)
-	// TODO(golang/go#38513): uncomment line below once we start displaying
-	// READMEs for directories instead of the top-level module.
-	// m.Units[0].Readme.Contents += " and more"
+	m.Units[0].Readme.Contents += " and more"
 
 	if err := testDB.InsertModule(ctx, m); err != nil {
 		t.Fatal(err)
@@ -256,11 +250,11 @@ func TestInsertModuleErrors(t *testing.T) {
 		},
 	}
 
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
+	for _, test := range testCases {
+		t.Run(test.name, func(t *testing.T) {
 			defer ResetTestDB(testDB, t)
-			if err := testDB.InsertModule(ctx, tc.module); !errors.Is(err, tc.wantWriteErr) {
-				t.Errorf("error: %v, want write error: %v", err, tc.wantWriteErr)
+			if err := testDB.InsertModule(ctx, test.module); !errors.Is(err, test.wantWriteErr) {
+				t.Errorf("error: %v, want write error: %v", err, test.wantWriteErr)
 			}
 		})
 	}
@@ -340,7 +334,7 @@ func TestLatestVersion(t *testing.T) {
 		}
 	}
 
-	for _, tc := range []struct {
+	for _, test := range []struct {
 		name        string
 		modulePath  string
 		wantVersion string
@@ -361,13 +355,13 @@ func TestLatestVersion(t *testing.T) {
 			wantVersion: "v3.0.1-rc9",
 		},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			isLatest, err := isLatestVersion(ctx, testDB.db, tc.modulePath, tc.wantVersion)
+		t.Run(test.name, func(t *testing.T) {
+			isLatest, err := isLatestVersion(ctx, testDB.db, test.modulePath, test.wantVersion)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if !isLatest {
-				t.Errorf("%s is not the latest version", tc.wantVersion)
+				t.Errorf("%s is not the latest version", test.wantVersion)
 			}
 		})
 	}
@@ -399,7 +393,7 @@ func TestLatestVersion_PreferIncompatibleOverPrerelease(t *testing.T) {
 		}
 	}
 
-	for _, tc := range []struct {
+	for _, test := range []struct {
 		modulePath string
 		want       string
 	}{
@@ -408,12 +402,12 @@ func TestLatestVersion_PreferIncompatibleOverPrerelease(t *testing.T) {
 			want:       "v2.0.0+incompatible",
 		},
 	} {
-		isLatest, err := isLatestVersion(ctx, testDB.db, tc.modulePath, tc.want)
+		isLatest, err := isLatestVersion(ctx, testDB.db, test.modulePath, test.want)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if !isLatest {
-			t.Errorf("%s is not the latest version", tc.want)
+			t.Errorf("%s is not the latest version", test.want)
 		}
 	}
 }

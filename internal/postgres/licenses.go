@@ -20,8 +20,8 @@ import (
 	"golang.org/x/pkgsite/internal/stdlib"
 )
 
-func (db *DB) getLicenses(ctx context.Context, fullPath, modulePath string, pathID int) (_ []*licenses.License, err error) {
-	defer derrors.Wrap(&err, "getLicenses(ctx, %d)", pathID)
+func (db *DB) getLicenses(ctx context.Context, fullPath, modulePath string, unitID int) (_ []*licenses.License, err error) {
+	defer derrors.Wrap(&err, "getLicenses(ctx, %d)", unitID)
 	defer middleware.ElapsedStat(ctx, "getLicenses")()
 
 	query := `
@@ -33,17 +33,17 @@ func (db *DB) getLicenses(ctx context.Context, fullPath, modulePath string, path
 		FROM
 			licenses l
 		INNER JOIN
-			units p
+			units u
 		ON
-			p.module_id=l.module_id
+			u.module_id=l.module_id
 		INNER JOIN
 			modules m
 		ON
-			p.module_id=m.id
+			u.module_id=m.id
 		WHERE
-			p.id = $1;`
+			u.id = $1;`
 
-	rows, err := db.db.Query(ctx, query, pathID)
+	rows, err := db.db.Query(ctx, query, unitID)
 	if err != nil {
 		return nil, err
 	}
@@ -80,21 +80,18 @@ func (db *DB) getLicenses(ctx context.Context, fullPath, modulePath string, path
 // getModuleLicenses returns all licenses associated with the given module path and
 // version. These are the top-level licenses in the module zip file.
 // It returns an InvalidArgument error if the module path or version is invalid.
-func (db *DB) getModuleLicenses(ctx context.Context, modulePath, resolvedVersion string) (_ []*licenses.License, err error) {
-	defer derrors.Wrap(&err, "getModuleLicenses(ctx, %q, %q)", modulePath, resolvedVersion)
+func (db *DB) getModuleLicenses(ctx context.Context, moduleID int) (_ []*licenses.License, err error) {
+	defer derrors.Wrap(&err, "getModuleLicenses(ctx, %d)", moduleID)
 
-	if modulePath == "" || resolvedVersion == "" {
-		return nil, fmt.Errorf("neither modulePath nor version can be empty: %w", derrors.InvalidArgument)
-	}
 	query := `
 	SELECT
 		types, file_path, contents, coverage
 	FROM
 		licenses
 	WHERE
-		module_path = $1 AND version = $2 AND position('/' in file_path) = 0
+		module_id = $1 AND position('/' in file_path) = 0
     `
-	rows, err := db.db.Query(ctx, query, modulePath, resolvedVersion)
+	rows, err := db.db.Query(ctx, query, moduleID)
 	if err != nil {
 		return nil, err
 	}

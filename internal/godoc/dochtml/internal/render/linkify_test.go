@@ -6,6 +6,7 @@ package render
 
 import (
 	"context"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -19,10 +20,31 @@ import (
 )
 
 func TestDocHTML(t *testing.T) {
+	linksDoc := `Documentation.
+
+The Go Project
+
+Go is an open source project.
+
+
+Links
+
+- title1, url1
+
+  -		title2 , url2
+
+
+Header
+
+More doc.
+`
+
 	for _, test := range []struct {
-		name string
-		doc  string
-		want string
+		name         string
+		doc          string
+		extractLinks []bool // nil means both
+		want         string
+		wantLinks    []Link
 	}{
 		{
 			name: "short documentation is rendered",
@@ -59,7 +81,7 @@ The Go Project
 
 Go is an open source project.`,
 			want: `<p>Documentation.
-</p><h3 id="hdr-The_Go_Project">The Go Project<a href="#hdr-The_Go_Project">¶</a></h3>
+</p><h4 id="hdr-The_Go_Project">The Go Project <a class="Documentation-idLink" href="#hdr-The_Go_Project">¶</a></h4>
   <p>Go is an open source project.
 </p>`,
 		},
@@ -101,13 +123,53 @@ TLSUnique contains the tls-unique channel binding value (see RFC
 			want: `<p>link <a href="http://foo">http://foo</a>&#34;&gt;&lt;script&gt;evil&lt;/script&gt;
 </p>`,
 		},
+		{
+			name:         "Links section is not extracted",
+			extractLinks: []bool{false},
+			doc:          linksDoc,
+			want: `<p>Documentation.
+</p><h4 id="hdr-The_Go_Project">The Go Project <a class="Documentation-idLink" href="#hdr-The_Go_Project">¶</a></h4>
+  <p>Go is an open source project.
+</p><h4 id="hdr-Links">Links <a class="Documentation-idLink" href="#hdr-Links">¶</a></h4>
+  <p>- title1, url1
+</p><pre>-		title2 , url2
+</pre><h4 id="hdr-Header">Header <a class="Documentation-idLink" href="#hdr-Header">¶</a></h4>
+  <p>More doc.
+</p>`,
+		},
+		{
+			name:         "Links section is extracted",
+			extractLinks: []bool{true},
+			doc:          linksDoc,
+			want: `<p>Documentation.
+</p><h4 id="hdr-The_Go_Project">The Go Project <a class="Documentation-idLink" href="#hdr-The_Go_Project">¶</a></h4>
+  <p>Go is an open source project.
+</p><h4 id="hdr-Header">Header <a class="Documentation-idLink" href="#hdr-Header">¶</a></h4>
+  <p>More doc.
+</p>`,
+			wantLinks: []Link{
+				{Text: "title1", Href: "url1"},
+				{Text: "title2", Href: "url2"},
+			},
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			r := New(context.Background(), nil, pkgTime, nil)
-			got := r.declHTML(test.doc, nil).Doc
-			want := testconversions.MakeHTMLForTest(test.want)
-			if diff := cmp.Diff(want, got, cmp.AllowUnexported(safehtml.HTML{})); diff != "" {
-				t.Errorf("r.declHTML() mismatch (-want +got)\n%s", diff)
+			extractLinks := test.extractLinks
+			if extractLinks == nil {
+				extractLinks = []bool{false, true}
+			}
+			for _, el := range extractLinks {
+				t.Run(fmt.Sprintf("extractLinks=%t", el), func(t *testing.T) {
+					r := New(context.Background(), nil, pkgTime, nil)
+					got := r.declHTML(test.doc, nil, el).Doc
+					want := testconversions.MakeHTMLForTest(test.want)
+					if diff := cmp.Diff(want, got, cmp.AllowUnexported(safehtml.HTML{})); diff != "" {
+						t.Errorf("r.declHTML() mismatch (-want +got)\n%s", diff)
+					}
+					if diff := cmp.Diff(test.wantLinks, r.Links()); diff != "" {
+						t.Errorf("r.Links() mismatch (-want +got)\n%s", diff)
+					}
+				})
 			}
 		})
 	}
@@ -122,8 +184,7 @@ func TestDeclHTML(t *testing.T) {
 		{
 			name:   "const",
 			symbol: "Nanosecond",
-			want: `<pre>
-const (
+			want: `const (
 <span id="Nanosecond" data-kind="constant"></span>	Nanosecond  <a href="#Duration">Duration</a> = 1
 <span id="Microsecond" data-kind="constant"></span>	Microsecond          = 1000 * <a href="#Nanosecond">Nanosecond</a>
 <span id="Millisecond" data-kind="constant"></span>	Millisecond          = 1000 * <a href="#Microsecond">Microsecond</a> <span class="comment">// comment</span>
@@ -132,39 +193,56 @@ const (
 	comment */</span>
 <span id="Minute" data-kind="constant"></span>	Minute = 60 * <a href="#Second">Second</a>
 <span id="Hour" data-kind="constant"></span>	Hour   = 60 * <a href="#Minute">Minute</a>
-)</pre>
-`,
+)`,
 		},
 		{
 			name:   "var",
 			symbol: "UTC",
-			want: `<pre>
-<span id="UTC" data-kind="variable"></span>var UTC *<a href="#Location">Location</a> = &amp;utcLoc</pre>
-`,
+			want:   `<span id="UTC" data-kind="variable"></span>var UTC *<a href="#Location">Location</a> = &amp;utcLoc`,
 		},
 		{
 			name:   "type",
 			symbol: "Ticker",
-			want: `<pre>
-type Ticker struct {
+			want: `type Ticker struct {
 <span id="Ticker.C" data-kind="field"></span>	C &lt;-chan <a href="#Time">Time</a> <span class="comment">// The channel on which the ticks are delivered.</span>
 	<span class="comment">// contains filtered or unexported fields</span>
-}</pre>
-`,
+
+}`,
 		},
 		{
 			name:   "func",
 			symbol: "Sleep",
-			want: `<pre>
-func Sleep(d <a href="#Duration">Duration</a>)</pre>
-`,
+			want:   `func Sleep(d <a href="#Duration">Duration</a>)`,
 		},
 		{
 			name:   "method",
 			symbol: "After",
-			want: `<pre>
-func After(d <a href="#Duration">Duration</a>) &lt;-chan <a href="#Time">Time</a></pre>
-`,
+			want:   `func After(d <a href="#Duration">Duration</a>) &lt;-chan <a href="#Time">Time</a>`,
+		},
+		{
+			name:   "interface",
+			symbol: "Iface",
+			want: `type Iface interface {
+<span id="Iface.M" data-kind="method"></span>	<span class="comment">// Method comment.</span>
+	M()
+
+	<span class="comment">// contains filtered or unexported methods</span>
+
+}`,
+		},
+		{
+			name:   "long literal",
+			symbol: "TooLongLiteral",
+			want: `type TooLongLiteral struct {
+<span id="TooLongLiteral.Name" data-kind="field"></span>	<span class="comment">// The name.</span>
+	Name <a href="/builtin#string">string</a>
+
+<span id="TooLongLiteral.Labels" data-kind="field"></span>	<span class="comment">// The labels.</span>
+	Labels <a href="/builtin#int">int</a> &#34;&#34; <span class="comment">/* 137 byte string literal not displayed */</span>
+
+	<span class="comment">// contains filtered or unexported fields</span>
+
+}`,
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -172,6 +250,7 @@ func After(d <a href="#Duration">Duration</a>) &lt;-chan <a href="#Time">Time</a
 			r := New(context.Background(), fsetTime, pkgTime, nil)
 			got := r.DeclHTML("", decl).Decl.String()
 			if diff := cmp.Diff(test.want, got); diff != "" {
+				fmt.Println(got)
 				t.Errorf("mismatch (-want +got)\n%s", diff)
 			}
 		})
@@ -280,7 +359,7 @@ b := 1
 `,
 		},
 	} {
-		out := codeHTML(test.in, legacyExampleTmpl)
+		out := codeHTML(test.in, exampleTmpl)
 		got := strings.TrimSpace(string(out.String()))
 		want := strings.TrimSpace(test.want)
 		if got != want {
@@ -300,7 +379,7 @@ func mustParse(t *testing.T, fset *token.FileSet, filename, src string) *ast.Fil
 
 func TestExampleCode(t *testing.T) {
 	fset := token.NewFileSet()
-	for _, tc := range []struct {
+	for _, test := range []struct {
 		name    string
 		example doc.Example
 		want    string
@@ -405,16 +484,35 @@ func main() {
 `,
 		},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
+		t.Run(test.name, func(t *testing.T) {
 			ctx := context.Background()
 			r := New(ctx, fset, pkgTime, nil)
-			got, err := r.codeString(&tc.example)
+			got, err := r.codeString(&test.example)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if diff := cmp.Diff(tc.want, got); diff != "" {
+			if diff := cmp.Diff(test.want, got); diff != "" {
 				t.Errorf("mismatch (-want +got):%s", diff)
 			}
 		})
+	}
+}
+
+func TestParseLink(t *testing.T) {
+	for _, test := range []struct {
+		line string
+		want *Link
+	}{
+		{"", nil},
+		{"foo", nil},
+		{"- a b", nil},
+		{"- a, b", &Link{Text: "a", Href: "b"}},
+		{"- a, b, c", &Link{Text: "a", Href: "b, c"}},
+		{"- a \t, https://b.com?x=1&y=2  ", &Link{Text: "a", Href: "https://b.com?x=1&y=2"}},
+	} {
+		got := parseLink(test.line)
+		if !cmp.Equal(got, test.want) {
+			t.Errorf("%q: got %+v, want %+v\n", test.line, got, test.want)
+		}
 	}
 }

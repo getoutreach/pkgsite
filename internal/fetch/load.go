@@ -28,7 +28,6 @@ import (
 	"golang.org/x/pkgsite/internal"
 	"golang.org/x/pkgsite/internal/config"
 	"golang.org/x/pkgsite/internal/derrors"
-	"golang.org/x/pkgsite/internal/experiment"
 	"golang.org/x/pkgsite/internal/godoc"
 	"golang.org/x/pkgsite/internal/log"
 	"golang.org/x/pkgsite/internal/source"
@@ -52,7 +51,6 @@ var goEnvs = []struct{ GOOS, GOARCH string }{
 	{"windows", "amd64"},
 	{"darwin", "amd64"},
 	{"js", "wasm"},
-	{"linux", "js"},
 }
 
 // loadPackage loads a Go package by calling loadPackageWithBuildContext, trying
@@ -81,8 +79,6 @@ func loadPackage(ctx context.Context, zipGoFiles []*zip.File, innerPath string, 
 // httpPost allows package fetch tests to stub out playground URL fetches.
 var httpPost = http.Post
 
-const docTooLargeReplacement = `<p>Documentation is too large to display.</p>`
-
 // loadPackageWithBuildContext loads a Go package made of .go files in zipGoFiles
 // using a build context constructed from the given GOOS and GOARCH values.
 // modulePath is stdlib.ModulePath for the Go standard library and the module
@@ -110,13 +106,11 @@ func loadPackageWithBuildContext(ctx context.Context, goos, goarch string, zipGo
 	docPkg := godoc.NewPackage(fset, goos, goarch, modInfo.ModulePackages)
 	for _, pf := range goFiles {
 		var removeNodes bool
-		if experiment.IsActive(ctx, internal.ExperimentRemoveUnusedAST) {
-			removeNodes = true
-			// Don't strip the seemingly unexported functions from the builtin package;
-			// they are actually Go builtins like make, new, etc.
-			if modulePath == stdlib.ModulePath && innerPath == "builtin" {
-				removeNodes = false
-			}
+		removeNodes = true
+		// Don't strip the seemingly unexported functions from the builtin package;
+		// they are actually Go builtins like make, new, etc.
+		if modulePath == stdlib.ModulePath && innerPath == "builtin" {
+			removeNodes = false
 		}
 		docPkg.AddFile(pf, removeNodes)
 	}
@@ -128,7 +122,7 @@ func loadPackageWithBuildContext(ctx context.Context, goos, goarch string, zipGo
 		return nil, err
 	}
 
-	synopsis, imports, docHTML, err := docPkg.Render(ctx, innerPath, sourceInfo, modInfo, goos, goarch)
+	synopsis, imports, _, err := docPkg.Render(ctx, innerPath, sourceInfo, modInfo, goos, goarch)
 	if err != nil && !errors.Is(err, godoc.ErrTooLarge) {
 		return nil, err
 	}
@@ -138,15 +132,14 @@ func loadPackageWithBuildContext(ctx context.Context, goos, goarch string, zipGo
 	}
 	v1path := internal.V1Path(importPath, modulePath)
 	return &goPackage{
-		path:              importPath,
-		name:              packageName,
-		synopsis:          synopsis,
-		v1path:            v1path,
-		imports:           imports,
-		documentationHTML: docHTML,
-		goos:              goos,
-		goarch:            goarch,
-		source:            src,
+		path:     importPath,
+		name:     packageName,
+		synopsis: synopsis,
+		v1path:   v1path,
+		imports:  imports,
+		goos:     goos,
+		goarch:   goarch,
+		source:   src,
 	}, err
 }
 
@@ -300,18 +293,21 @@ func init() {
 	}
 }
 
-var zipLoadShedder = loadShedder{maxSizeInFlight: math.MaxUint64}
+var zipLoadShedder *loadShedder
 
 func init() {
 	ctx := context.Background()
 	mebis := config.GetEnvInt("GO_DISCOVERY_MAX_IN_FLIGHT_ZIP_MI", -1)
 	if mebis > 0 {
 		log.Infof(ctx, "shedding load over %dMi", mebis)
-		zipLoadShedder.maxSizeInFlight = uint64(mebis) * mib
+		zipLoadShedder = &loadShedder{maxSizeInFlight: uint64(mebis) * mib}
 	}
 }
 
 // ZipLoadShedStats returns a snapshot of the current LoadShedStats for zip files.
 func ZipLoadShedStats() LoadShedStats {
-	return zipLoadShedder.stats()
+	if zipLoadShedder != nil {
+		return zipLoadShedder.stats()
+	}
+	return LoadShedStats{}
 }

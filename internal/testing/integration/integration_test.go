@@ -15,11 +15,10 @@ import (
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
-	"github.com/go-redis/redis/v7"
+	"github.com/go-redis/redis/v8"
 	"github.com/google/safehtml/template"
 	"golang.org/x/pkgsite/internal"
 	"golang.org/x/pkgsite/internal/config"
-	"golang.org/x/pkgsite/internal/frontend"
 	"golang.org/x/pkgsite/internal/godoc/dochtml"
 	"golang.org/x/pkgsite/internal/index"
 	"golang.org/x/pkgsite/internal/postgres"
@@ -79,20 +78,24 @@ func TestEndToEndProcessing(t *testing.T) {
 
 	// TODO: it would be better if InMemory made http requests
 	// back to worker, rather than calling fetch itself.
-	sourceClient := source.NewClient(1 * time.Second)
 	queue := queue.NewInMemory(ctx, 10, nil, func(ctx context.Context, mpath, version string) (int, error) {
-		return worker.FetchAndUpdateState(ctx, mpath, version, proxyClient, sourceClient, testDB, "test")
+		f := &worker.Fetcher{
+			ProxyClient:  proxyClient,
+			SourceClient: source.NewClient(1 * time.Second),
+			DB:           testDB,
+		}
+		code, _, err := f.FetchAndUpdateState(ctx, mpath, version, "test", false)
+		return code, err
 	})
 	workerServer, err := worker.NewServer(&config.Config{}, worker.ServerConfig{
-		DB:                   testDB,
-		IndexClient:          indexClient,
-		ProxyClient:          proxyClient,
-		SourceClient:         source.NewClient(1 * time.Second),
-		RedisHAClient:        redisHAClient,
-		RedisCacheClient:     redisCacheClient,
-		Queue:                queue,
-		TaskIDChangeInterval: 10 * time.Minute,
-		StaticPath:           template.TrustedSourceFromConstant("../../../content/static"),
+		DB:               testDB,
+		IndexClient:      indexClient,
+		ProxyClient:      proxyClient,
+		SourceClient:     source.NewClient(1 * time.Second),
+		RedisHAClient:    redisHAClient,
+		RedisCacheClient: redisCacheClient,
+		Queue:            queue,
+		StaticPath:       template.TrustedSourceFromConstant("../../../content/static"),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -101,22 +104,7 @@ func TestEndToEndProcessing(t *testing.T) {
 	workerServer.Install(workerMux.Handle)
 	workerHTTP := httptest.NewServer(workerMux)
 
-	frontendServer, err := frontend.NewServer(frontend.ServerConfig{
-		DataSourceGetter:     func(context.Context) internal.DataSource { return testDB },
-		Queue:                queue,
-		CompletionClient:     redisHAClient,
-		TaskIDChangeInterval: 10 * time.Minute,
-		StaticPath:           template.TrustedSourceFromConstant("../../../content/static"),
-		ThirdPartyPath:       "../../../third_party",
-		AppVersionLabel:      "",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	frontendMux := http.NewServeMux()
-	frontendServer.Install(frontendMux.Handle, redisCacheClient, nil)
-	frontendHTTP := httptest.NewServer(frontendMux)
-
+	frontendHTTP := setupFrontend(ctx, t, queue)
 	if _, err := doGet(workerHTTP.URL + "/poll"); err != nil {
 		t.Fatal(err)
 	}
@@ -135,28 +123,6 @@ func TestEndToEndProcessing(t *testing.T) {
 	}
 	if idx := strings.Index(string(body), "525600"); idx < 0 {
 		t.Error("Documentation constant 525600 not found in body")
-	}
-
-	// Populate the auto-completion indexes from the search documents that should
-	// have been inserted above.
-	if _, err := doGet(workerHTTP.URL + "/update-redis-indexes"); err != nil {
-		t.Fatal(err)
-	}
-	completionBody, err := doGet(frontendHTTP.URL + "/autocomplete?q=foo")
-	if err != nil {
-		t.Fatal(err)
-	}
-	completion := "github.com/my/module/foo"
-	if idx := strings.Index(string(completionBody), completion); idx < 0 {
-		t.Errorf("Auto-completion %q not found in JSON response", completion)
-	}
-	emptyCompletion, err := doGet(frontendHTTP.URL + "/autocomplete?q=frog")
-	if err != nil {
-		t.Fatal(err)
-	}
-	// This could be made more robust by actually parsing the JSON.
-	if got := string(emptyCompletion); got != "[]" {
-		t.Errorf("GET /autocomplete?q=frog: expected empty results, got %q", got)
 	}
 }
 

@@ -10,12 +10,9 @@ import (
 	"net/http"
 	"os"
 	"sort"
-	"strings"
 	"testing"
 	"time"
 
-	"github.com/google/go-cmp/cmp"
-	"github.com/google/safehtml"
 	"golang.org/x/pkgsite/internal"
 	"golang.org/x/pkgsite/internal/licenses"
 	"golang.org/x/pkgsite/internal/log"
@@ -140,7 +137,7 @@ func proxyFetcher(t *testing.T, withLicenseDetector bool, ctx context.Context, m
 		Files:      mod.mod.Files,
 	}})
 	defer teardownProxy()
-	got := FetchModule(ctx, modulePath, fetchVersion, proxyClient, sourceClient)
+	got := FetchModule(ctx, modulePath, fetchVersion, proxyClient, sourceClient, false)
 	if !withLicenseDetector {
 		return got, nil
 	}
@@ -215,35 +212,5 @@ func sortFetchResult(fr *FetchResult) {
 		sort.Slice(dir.Licenses, func(i, j int) bool {
 			return dir.Licenses[i].FilePath < dir.Licenses[j].FilePath
 		})
-	}
-}
-
-// validateDocumentationHTML checks that the doc HTML contains a set of
-// substrings. The desired strings consist of the "want" module's documentation
-// fields, with multiple substrings separated by '~'.
-func validateDocumentationHTML(t *testing.T, got, want *internal.Module) {
-	t.Helper()
-	defer func() {
-		if r := recover(); r != nil {
-			t.Fatalf("Recovered in checkDocumentationHTML: %v \n; diff = %s", r, cmp.Diff(want, got))
-		}
-	}()
-
-	checkHTML := func(msg string, i int, hGot, hWant safehtml.HTML) {
-		t.Helper()
-		got := hGot.String()
-		// Treat the wanted DocumentationHTML as a set of substrings to look for, separated by ~.
-		for _, want := range strings.Split(hWant.String(), "~") {
-			want = strings.TrimSpace(want)
-			if !strings.Contains(got, want) {
-				t.Errorf("doc for %s[%d]:\nmissing %q; got\n%q", msg, i, want, got)
-			}
-		}
-	}
-	for i := 0; i < len(want.Units); i++ {
-		if !want.Units[i].IsPackage() {
-			continue
-		}
-		checkHTML("Directories", i, got.Units[i].Documentation.HTML, want.Units[i].Documentation.HTML)
 	}
 }

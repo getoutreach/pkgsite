@@ -333,8 +333,8 @@ func TestTrimLargeCode(t *testing.T) {
 
 func fetchAndCheckStatus(ctx context.Context, t *testing.T, proxyClient *proxy.Client, modulePath, version string, wantCode int) {
 	t.Helper()
-	sourceClient := source.NewClient(sourceTimeout)
-	code, err := FetchAndUpdateState(ctx, modulePath, version, proxyClient, sourceClient, testDB, testAppVersion)
+	f := Fetcher{proxyClient, source.NewClient(sourceTimeout), testDB}
+	code, _, err := f.FetchAndUpdateState(ctx, modulePath, version, testAppVersion, false)
 	switch code {
 	case http.StatusOK:
 		if err != nil {
@@ -418,7 +418,7 @@ func checkPackage(ctx context.Context, t *testing.T, pkgPath string) {
 		t.Fatalf("testDB.GetUnitMeta(%q, %q, %q): isPackage = false; want = true",
 			pkgPath, internal.UnknownModulePath, sample.VersionString)
 	}
-	dir, err := testDB.GetUnit(ctx, um, internal.WithDocumentation)
+	dir, err := testDB.GetUnit(ctx, um, internal.WithMain)
 	if err != nil {
 		t.Fatal(err)
 	}

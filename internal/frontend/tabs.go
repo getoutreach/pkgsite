@@ -5,12 +5,12 @@
 package frontend
 
 import (
+	"context"
 	"fmt"
 	"net/http"
-	"net/url"
-	"strings"
 
 	"golang.org/x/pkgsite/internal"
+	"golang.org/x/pkgsite/internal/derrors"
 )
 
 // TabSettings defines tab-specific metadata.
@@ -33,175 +33,63 @@ type TabSettings struct {
 	Disabled bool
 }
 
-var (
-	packageTabSettings = []TabSettings{
-		{
-			Name:         legacyTabDoc,
-			DisplayName:  "Doc",
-			TemplateName: "pkg_doc.tmpl",
-		},
-		{
-			Name:              legacyTabOverview,
-			AlwaysShowDetails: true,
-			DisplayName:       "Overview",
-			TemplateName:      "overview.tmpl",
-		},
-		{
-			Name:              legacyTabSubdirectories,
-			AlwaysShowDetails: true,
-			DisplayName:       "Subdirectories",
-			TemplateName:      "subdirectories.tmpl",
-		},
-		{
-			Name:              legacyTabVersions,
-			AlwaysShowDetails: true,
-			DisplayName:       "Versions",
-			TemplateName:      "versions.tmpl",
-		},
-		{
-			Name:              legacyTabImports,
-			DisplayName:       "Imports",
-			AlwaysShowDetails: true,
-			TemplateName:      "pkg_imports.tmpl",
-		},
-		{
-			Name:              legacyTabImportedBy,
-			DisplayName:       "Imported By",
-			AlwaysShowDetails: true,
-			TemplateName:      "pkg_importedby.tmpl",
-		},
-		{
-			Name:         legacyTabLicenses,
-			DisplayName:  "Licenses",
-			TemplateName: "licenses.tmpl",
-		},
-	}
-	packageTabLookup = make(map[string]TabSettings)
-
-	directoryTabSettings = make([]TabSettings, len(packageTabSettings))
-	directoryTabLookup   = make(map[string]TabSettings)
-
-	moduleTabSettings = []TabSettings{
-		{
-			Name:              legacyTabOverview,
-			AlwaysShowDetails: true,
-			DisplayName:       "Overview",
-			TemplateName:      "overview.tmpl",
-		},
-		{
-			Name:              "packages",
-			AlwaysShowDetails: true,
-			DisplayName:       "Packages",
-			TemplateName:      "subdirectories.tmpl",
-		},
-		{
-			Name:              legacyTabVersions,
-			AlwaysShowDetails: true,
-			DisplayName:       "Versions",
-			TemplateName:      "versions.tmpl",
-		},
-		{
-			Name:         legacyTabLicenses,
-			DisplayName:  "Licenses",
-			TemplateName: "licenses.tmpl",
-		},
-	}
-	moduleTabLookup = make(map[string]TabSettings)
+const (
+	tabMain       = ""
+	tabVersions   = "versions"
+	tabImports    = "imports"
+	tabImportedBy = "importedby"
+	tabLicenses   = "licenses"
 )
 
-// validDirectoryTabs indicates if a tab is enabled in the directory view.
-var validDirectoryTabs = map[string]bool{
-	legacyTabLicenses:       true,
-	legacyTabOverview:       true,
-	legacyTabSubdirectories: true,
-}
+var (
+	unitTabs = []TabSettings{
+		{
+			Name:         tabMain,
+			TemplateName: "unit_details.tmpl",
+			AlwaysShowDetails: true,
+		},
+		{
+			Name:         tabVersions,
+			TemplateName: "unit_versions.tmpl",
+		},
+		{
+			Name:         tabImports,
+			TemplateName: "unit_imports.tmpl",
+		},
+		{
+			Name:         tabImportedBy,
+			TemplateName: "unit_importedby.tmpl",
+		},
+		{
+			Name:         tabLicenses,
+			TemplateName: "unit_licenses.tmpl",
+		},
+	}
+	unitTabLookup = make(map[string]TabSettings, len(unitTabs))
+)
 
 func init() {
-	for i, ts := range packageTabSettings {
-		// The directory view uses the same design as the packages view
-		// for visual consistency, but some tabs don't make sense, so
-		// we disable them.
-		if !validDirectoryTabs[ts.Name] {
-			ts.Disabled = true
-		}
-		directoryTabSettings[i] = ts
-	}
-	for _, d := range packageTabSettings {
-		packageTabLookup[d.Name] = d
-	}
-	for _, d := range directoryTabSettings {
-		directoryTabLookup[d.Name] = d
-	}
-	for _, d := range moduleTabSettings {
-		moduleTabLookup[d.Name] = d
+	for _, t := range unitTabs {
+		unitTabLookup[t.Name] = t
 	}
 }
-
-const (
-	legacyTabDoc            = "doc"
-	legacyTabOverview       = "overview"
-	legacyTabSubdirectories = "subdirectories"
-	legacyTabVersions       = "versions"
-	legacyTabImports        = "imports"
-	legacyTabImportedBy     = "importedby"
-	legacyTabLicenses       = "licenses"
-)
 
 // fetchDetailsForPackage returns tab details by delegating to the correct detail
 // handler.
-func fetchDetailsForPackage(r *http.Request, tab string, ds internal.DataSource, um *internal.UnitMeta) (interface{}, error) {
-	ctx := r.Context()
+func fetchDetailsForUnit(ctx context.Context, r *http.Request, tab string, ds internal.DataSource, um *internal.UnitMeta) (_ interface{}, err error) {
+	defer derrors.Wrap(&err, "fetchDetailsForUnit(r, %q, ds, um=%q,%q,%q)", tab, um.Path, um.ModulePath, um.Version)
 	switch tab {
-	case legacyTabDoc:
-		return fetchDocumentationDetails(ctx, ds, um)
-	case legacyTabOverview:
-		return fetchPackageOverviewDetails(ctx, ds, um, urlIsVersioned(r.URL))
-	case legacyTabSubdirectories:
-		return fetchDirectoryDetails(ctx, ds, um, false)
-	case legacyTabVersions:
+	case tabMain:
+		_, expandReadme := r.URL.Query()["readme"]
+		return fetchMainDetails(ctx, ds, um, expandReadme)
+	case tabVersions:
 		return fetchVersionsDetails(ctx, ds, um.Path, um.ModulePath)
-	case legacyTabImports:
+	case tabImports:
 		return fetchImportsDetails(ctx, ds, um.Path, um.ModulePath, um.Version)
-	case legacyTabImportedBy:
+	case tabImportedBy:
 		return fetchImportedByDetails(ctx, ds, um.Path, um.ModulePath)
-	case legacyTabLicenses:
+	case tabLicenses:
 		return fetchLicensesDetails(ctx, ds, um)
 	}
 	return nil, fmt.Errorf("BUG: unable to fetch details: unknown tab %q", tab)
-}
-
-// fetchDetailsForModule returns tab details by delegating to the correct detail
-// handler.
-func fetchDetailsForModule(r *http.Request, tab string, ds internal.DataSource, um *internal.UnitMeta) (interface{}, error) {
-	ctx := r.Context()
-	switch tab {
-	case legacyTabOverview:
-		return fetchOverviewDetails(ctx, ds, um, urlIsVersioned(r.URL))
-	case "packages":
-		return fetchDirectoryDetails(ctx, ds, um, true)
-	case legacyTabVersions:
-		return fetchModuleVersionsDetails(ctx, ds, um.ModulePath)
-	case legacyTabLicenses:
-		return fetchLicensesDetails(ctx, ds, um)
-	}
-	return nil, fmt.Errorf("BUG: unable to fetch details: unknown tab %q", tab)
-}
-
-// fetchDetailsForDirectory returns tab details by delegating to the correct
-// detail handler.
-func fetchDetailsForDirectory(r *http.Request, tab string, ds internal.DataSource, um *internal.UnitMeta) (interface{}, error) {
-	ctx := r.Context()
-	switch tab {
-	case legacyTabOverview:
-		return fetchOverviewDetails(ctx, ds, um, urlIsVersioned(r.URL))
-	case legacyTabSubdirectories:
-		return fetchDirectoryDetails(ctx, ds, um, false)
-	case legacyTabLicenses:
-		return fetchLicensesDetails(ctx, ds, um)
-	}
-	return nil, fmt.Errorf("BUG: unable to fetch details: unknown tab %q", tab)
-}
-
-func urlIsVersioned(url *url.URL) bool {
-	return strings.ContainsRune(url.Path, '@')
 }

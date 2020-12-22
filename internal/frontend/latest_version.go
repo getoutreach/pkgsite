@@ -11,30 +11,36 @@ import (
 	"golang.org/x/pkgsite/internal"
 	"golang.org/x/pkgsite/internal/derrors"
 	"golang.org/x/pkgsite/internal/log"
+	"golang.org/x/pkgsite/internal/middleware"
 )
 
-// GetLatestMajorVersion returns the major version of a package or module.
-// If a module isn't found from the series path or an error ocurs, an empty string is returned
+func (s *Server) GetLatestInfo(ctx context.Context, fullPath, modulePath string) (latest middleware.LatestInfo) {
+	latest.MinorVersion = s.getLatestMinorVersion(ctx, fullPath, internal.UnknownModulePath)
+	latest.MajorModulePath, latest.MajorUnitPath = s.getLatestMajorVersion(ctx, fullPath, modulePath)
+	return latest
+}
+
+// getLatestMajorVersion returns the latest module path and the full unit path
+// of any major version found given the fullPath and the modulePath.
 // It is intended to be used as an argument to middleware.LatestVersions.
-func (s *Server) GetLatestMajorVersion(ctx context.Context, seriesPath string) string {
-	mv, err := s.getDataSource(ctx).GetLatestMajorVersion(ctx, seriesPath)
+func (s *Server) getLatestMajorVersion(ctx context.Context, unitPath, modulePath string) (_ string, _ string) {
+	latestModulePath, latestPackagePath, err := s.getDataSource(ctx).GetLatestMajorVersion(ctx, unitPath, modulePath)
 	if err != nil {
 		if !errors.Is(err, derrors.NotFound) {
 			log.Errorf(ctx, "GetLatestMajorVersion: %v", err)
 		}
-		return ""
+		return "", ""
 	}
-
-	return mv
+	return latestModulePath, latestPackagePath
 }
 
-// GetLatestMinorVersion returns the latest minor version of the package or module.
+// getLatestMinorVersion returns the latest minor version of the unit.
 // The linkable form of the minor version is returned and is an empty string on error.
 // It is intended to be used as an argument to middleware.LatestVersions.
-func (s *Server) GetLatestMinorVersion(ctx context.Context, packagePath, modulePath, pageType string) string {
+func (s *Server) getLatestMinorVersion(ctx context.Context, unitPath, modulePath string) string {
 	// It is okay to use a different DataSource (DB connection) than the rest of the
 	// request, because this makes a self-contained call on the DB.
-	v, err := latestMinorVersion(ctx, s.getDataSource(ctx), packagePath, modulePath, pageType)
+	v, err := latestMinorVersion(ctx, s.getDataSource(ctx), unitPath, modulePath)
 	if err != nil {
 		// We get NotFound errors from directories; they clutter the log.
 		if !errors.Is(err, derrors.NotFound) {
@@ -48,13 +54,9 @@ func (s *Server) GetLatestMinorVersion(ctx context.Context, packagePath, moduleP
 
 // TODO(https://github.com/golang/go/issues/40107): this is currently tested in server_test.go, but
 // we should add tests for this function.
-func latestMinorVersion(ctx context.Context, ds internal.DataSource, packagePath, modulePath, pageType string) (_ string, err error) {
-	defer derrors.Wrap(&err, "latestMinorVersion(ctx, %q, %q)", modulePath, packagePath)
-	fullPath := packagePath
-	if pageType == legacyPageTypeModule || pageType == legacyPageTypeModuleStd {
-		fullPath = modulePath
-	}
-	um, err := ds.GetUnitMeta(ctx, fullPath, modulePath, internal.LatestVersion)
+func latestMinorVersion(ctx context.Context, ds internal.DataSource, unitPath, modulePath string) (_ string, err error) {
+	defer derrors.Wrap(&err, "latestMinorVersion(ctx, %q, %q)", unitPath, modulePath)
+	um, err := ds.GetUnitMeta(ctx, unitPath, modulePath, internal.LatestVersion)
 	if err != nil {
 		return "", err
 	}

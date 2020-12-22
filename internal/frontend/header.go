@@ -1,138 +1,99 @@
-// Copyright 2019 The Go Authors. All rights reserved.
+// Copyright 2020 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
 package frontend
 
 import (
-	"fmt"
 	"path"
-	"strings"
 	"time"
 
+	"golang.org/x/mod/module"
 	"golang.org/x/pkgsite/internal"
-	"golang.org/x/pkgsite/internal/derrors"
-	"golang.org/x/pkgsite/internal/licenses"
-	"golang.org/x/pkgsite/internal/middleware"
 	"golang.org/x/pkgsite/internal/stdlib"
 )
 
-// Package contains information for an individual package.
-type Package struct {
-	Module
-	Path               string // full import path
-	URL                string // relative to this site
-	LatestURL          string // link with latest-version placeholder, relative to this site
-	IsRedistributable  bool
-	Licenses           []LicenseMetadata
-	PathAfterDirectory string // for display on the directories tab; used by Directory
-	Synopsis           string // for display on the directories tab; used by Directory
-}
+const (
+	pageTypeModule    = "module"
+	pageTypeDirectory = "directory"
+	pageTypePackage   = "package"
+	pageTypeCommand   = "command"
+	pageTypeModuleStd = "std"
+	pageTypeStdlib    = "standard library"
+)
 
-// Module contains information for an individual module.
-type Module struct {
-	DisplayVersion    string
-	LinkVersion       string
-	ModulePath        string
-	CommitTime        string
-	IsRedistributable bool
-	URL               string // relative to this site
-	LatestURL         string // link with latest-version placeholder, relative to this site
-	Licenses          []LicenseMetadata
-}
-
-// createPackage returns a *Package based on the fields of the specified
-// internal package and version info.
-//
-// latestRequested indicates whether the user requested the latest
-// version of the package. If so, the returned Package.URL will have the
-// structure /<path> instead of /<path>@<version>.
-func createPackage(pkg *internal.PackageMeta, mi *internal.ModuleInfo, latestRequested bool) (_ *Package, err error) {
-	defer derrors.Wrap(&err, "createPackage(%v, %v, %t)", pkg, mi, latestRequested)
-
-	var modLicenses []*licenses.Metadata
-	for _, lm := range pkg.Licenses {
-		if path.Dir(lm.FilePath) == "." {
-			modLicenses = append(modLicenses, lm)
-		}
-	}
-
-	m := createModule(mi, modLicenses, latestRequested)
-	urlVersion := m.LinkVersion
-	if latestRequested {
-		urlVersion = internal.LatestVersion
-	}
-	return &Package{
-		Path:              pkg.Path,
-		IsRedistributable: pkg.IsRedistributable,
-		Licenses:          transformLicenseMetadata(pkg.Licenses),
-		Module:            *m,
-		URL:               constructPackageURL(pkg.Path, mi.ModulePath, urlVersion),
-		LatestURL:         constructPackageURL(pkg.Path, mi.ModulePath, middleware.LatestMinorVersionPlaceholder),
-	}, nil
-}
-
-// createModule returns a *Module based on the fields of the specified
-// versionInfo.
-//
-// latestRequested indicates whether the user requested the latest
-// version of the package. If so, the returned Module.URL will have the
-// structure /<path> instead of /<path>@<version>.
-func createModule(mi *internal.ModuleInfo, licmetas []*licenses.Metadata, latestRequested bool) *Module {
-	urlVersion := linkVersion(mi.Version, mi.ModulePath)
-	if latestRequested {
-		urlVersion = internal.LatestVersion
-	}
-	return &Module{
-		DisplayVersion:    displayVersion(mi.Version, mi.ModulePath),
-		LinkVersion:       linkVersion(mi.Version, mi.ModulePath),
-		ModulePath:        mi.ModulePath,
-		CommitTime:        absoluteTime(mi.CommitTime),
-		IsRedistributable: mi.IsRedistributable,
-		Licenses:          transformLicenseMetadata(licmetas),
-		URL:               constructModuleURL(mi.ModulePath, urlVersion),
-		LatestURL:         constructModuleURL(mi.ModulePath, middleware.LatestMinorVersionPlaceholder),
+// pageTitle determines the pageTitles for a given unit.
+// See TestPageTitlesAndTypes for examples.
+func pageTitle(um *internal.UnitMeta) string {
+	switch {
+	case um.Path == stdlib.ModulePath:
+		return "Standard library"
+	case um.IsCommand():
+		return effectiveName(um.Path, um.Name)
+	case um.IsPackage():
+		return um.Name
+	case um.IsModule():
+		prefix, _, _ := module.SplitPathVersion(um.Path)
+		return path.Base(prefix)
+	default:
+		return path.Base(um.Path) + "/"
 	}
 }
 
-func constructModuleURL(modulePath, linkVersion string) string {
-	url := "/"
-	if modulePath != stdlib.ModulePath {
-		url += "mod/"
+// pageType determines the pageType for a given unit.
+func pageType(um *internal.UnitMeta) string {
+	if um.Path == stdlib.ModulePath {
+		return pageTypeModuleStd
 	}
-	url += modulePath
-	if linkVersion != internal.LatestVersion {
-		url += "@" + linkVersion
+	if um.IsCommand() {
+		return pageTypeCommand
 	}
-	return url
+	if um.IsPackage() {
+		return pageTypePackage
+	}
+	if um.IsModule() {
+		return pageTypeModule
+	}
+	return pageTypeDirectory
 }
 
-func constructPackageURL(pkgPath, modulePath, linkVersion string) string {
-	if linkVersion == internal.LatestVersion {
-		return "/" + pkgPath
+// pageLabels determines the labels to display for a given unit.
+// See TestPageTitlesAndTypes for examples.
+func pageLabels(um *internal.UnitMeta) []string {
+	var pageTypes []string
+	if um.Path == stdlib.ModulePath {
+		return nil
 	}
-	if pkgPath == modulePath || modulePath == stdlib.ModulePath {
-		return fmt.Sprintf("/%s@%s", pkgPath, linkVersion)
+	if um.IsCommand() {
+		pageTypes = append(pageTypes, pageTypeCommand)
+	} else if um.IsPackage() {
+		pageTypes = append(pageTypes, pageTypePackage)
 	}
-	return fmt.Sprintf("/%s@%s/%s", modulePath, linkVersion, strings.TrimPrefix(pkgPath, modulePath+"/"))
+	if um.IsModule() {
+		pageTypes = append(pageTypes, pageTypeModule)
+	}
+	if !um.IsPackage() && !um.IsModule() {
+		pageTypes = append(pageTypes, pageTypeDirectory)
+	}
+	if stdlib.Contains(um.Path) {
+		pageTypes = append(pageTypes, pageTypeStdlib)
+	}
+	return pageTypes
 }
 
-// packageHTMLTitle constructs the details page title for pkg.
-// The string will appear in the <title> element (and thus
-// the browser tab).
-func packageHTMLTitle(pkgPath, pkgName string) string {
+// effectiveName returns either the command name or package name.
+func effectiveName(pkgPath, pkgName string) string {
 	if pkgName != "main" {
-		return pkgName + " package"
+		return pkgName
 	}
-	return effectiveName(pkgPath, pkgName) + " command"
-}
-
-// moduleHTMLTitle constructs the <title> contents, for tabs in the browser.
-func moduleHTMLTitle(modulePath string) string {
-	if modulePath == stdlib.ModulePath {
-		return "stdlib"
+	var prefix string // package path without version
+	if pkgPath[len(pkgPath)-3:] == "/v1" {
+		prefix = pkgPath[:len(pkgPath)-3]
+	} else {
+		prefix, _, _ = module.SplitPathVersion(pkgPath)
 	}
-	return modulePath + " module"
+	_, base := path.Split(prefix)
+	return base
 }
 
 // absoluteTime takes a date and returns returns a human-readable,

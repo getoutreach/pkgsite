@@ -19,17 +19,24 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/google/safehtml/template"
 	"golang.org/x/net/html"
-	"golang.org/x/pkgsite/internal"
-	"golang.org/x/pkgsite/internal/experiment"
+	"golang.org/x/pkgsite/internal/godoc/dochtml/internal/render"
 	"golang.org/x/pkgsite/internal/godoc/internal/doc"
 	"golang.org/x/pkgsite/internal/testing/htmlcheck"
 )
 
 var templateSource = template.TrustedSourceFromConstant("../../../content/static/html/doc")
 
+var (
+	in           = htmlcheck.In
+	hasAttr      = htmlcheck.HasAttr
+	hasHref      = htmlcheck.HasHref
+	hasExactText = htmlcheck.HasExactText
+)
+
 func TestRender(t *testing.T) {
 	LoadTemplates(templateSource)
 	fset, d := mustLoadPackage("everydecl")
+
 	rawDoc, err := Render(context.Background(), fset, d, RenderOptions{
 		FileLinkFunc:   func(string) string { return "file" },
 		SourceLinkFunc: func(ast.Node) string { return "src" },
@@ -37,56 +44,6 @@ func TestRender(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	htmlDoc, err := html.Parse(strings.NewReader(rawDoc.String()))
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Check that there are no duplicate id attributes.
-	t.Run("duplicate ids", func(t *testing.T) {
-		testDuplicateIDs(t, htmlDoc)
-	})
-	t.Run("ids-and-kinds", func(t *testing.T) {
-		// Check that the id and data-kind labels are right.
-		testIDsAndKinds(t, htmlDoc)
-	})
-
-	checker := htmlcheck.In(".Documentation-note",
-		htmlcheck.In("h2", htmlcheck.HasAttr("id", "pkg-note-BUG"), htmlcheck.HasExactText("Bugs ¶")),
-		htmlcheck.In("a", htmlcheck.HasHref("#pkg-note-BUG")))
-	if err := checker(htmlDoc); err != nil {
-		t.Errorf("note check: %v", err)
-	}
-
-	checker = htmlcheck.In(".Documentation-index",
-		htmlcheck.In(".Documentation-indexNote", htmlcheck.In("a", htmlcheck.HasHref("#pkg-note-BUG"), htmlcheck.HasExactText("Bugs"))))
-	if err := checker(htmlDoc); err != nil {
-		t.Errorf("note check: %v", err)
-	}
-
-	checker = htmlcheck.In(".DocNav-notes",
-		htmlcheck.In("#nav-group-notes", htmlcheck.In("li", htmlcheck.In("a", htmlcheck.HasHref("#pkg-note-BUG"), htmlcheck.HasExactText("Bugs")))))
-	if err := checker(htmlDoc); err != nil {
-		t.Errorf("note check: %v", err)
-	}
-
-	checker = htmlcheck.In("#DocNavMobile-select",
-		htmlcheck.In("optgroup[label=Notes]", htmlcheck.In("option", htmlcheck.HasAttr("value", "pkg-note-BUG"), htmlcheck.HasExactText("Bugs"))))
-	if err := checker(htmlDoc); err != nil {
-		t.Errorf("note check: %v", err)
-	}
-}
-
-func TestRenderExperimental(t *testing.T) {
-	LoadTemplates(templateSource)
-	fset, d := mustLoadPackage("everydecl")
-
-	rawDoc, err := Render(experiment.NewContext(context.Background(), internal.ExperimentUnitPage), fset, d, RenderOptions{
-		FileLinkFunc:   func(string) string { return "file" },
-		SourceLinkFunc: func(ast.Node) string { return "src" },
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
 
 	htmlDoc, err := html.Parse(strings.NewReader(rawDoc.String()))
 	if err != nil {
@@ -101,27 +58,27 @@ func TestRenderExperimental(t *testing.T) {
 		testIDsAndKinds(t, htmlDoc)
 	})
 
-	checker := htmlcheck.In(".Documentation-note",
-		htmlcheck.In("h3", htmlcheck.HasAttr("id", "pkg-note-BUG"), htmlcheck.HasExactText("Bugs ¶")),
-		htmlcheck.In("a", htmlcheck.HasHref("#pkg-note-BUG")))
+	checker := in(".Documentation-note",
+		in("h3", hasAttr("id", "pkg-note-BUG"), hasExactText("Bugs ¶")),
+		in("a", hasHref("#pkg-note-BUG")))
 	if err := checker(htmlDoc); err != nil {
 		t.Errorf("note check: %v", err)
 	}
 
-	checker = htmlcheck.In(".Documentation-index",
-		htmlcheck.In(".Documentation-indexNote", htmlcheck.In("a", htmlcheck.HasHref("#pkg-note-BUG"), htmlcheck.HasExactText("Bugs"))))
+	checker = in(".Documentation-index",
+		in(".Documentation-indexNote", in("a", hasHref("#pkg-note-BUG"), hasExactText("Bugs"))))
 	if err := checker(htmlDoc); err != nil {
 		t.Errorf("note check: %v", err)
 	}
 
-	checker = htmlcheck.In(".DocNav-notes",
-		htmlcheck.In("#nav-group-notes", htmlcheck.In("li", htmlcheck.In("a", htmlcheck.HasHref("#pkg-note-BUG"), htmlcheck.HasExactText("Bugs")))))
+	checker = in(".DocNav-notes",
+		in("#nav-group-notes", in("li", in("a", hasHref("#pkg-note-BUG"), hasExactText("Bugs")))))
 	if err := checker(htmlDoc); err != nil {
 		t.Errorf("note check: %v", err)
 	}
 
-	checker = htmlcheck.In("#DocNavMobile-select",
-		htmlcheck.In("optgroup[label=Notes]", htmlcheck.In("option", htmlcheck.HasAttr("value", "pkg-note-BUG"), htmlcheck.HasExactText("Bugs"))))
+	checker = in("#DocNavMobile-select",
+		in("optgroup[label=Notes]", in("option", hasAttr("value", "pkg-note-BUG"), hasExactText("Bugs"))))
 	if err := checker(htmlDoc); err != nil {
 		t.Errorf("note check: %v", err)
 	}
@@ -131,27 +88,26 @@ func TestRenderParts(t *testing.T) {
 	LoadTemplates(templateSource)
 	fset, d := mustLoadPackage("everydecl")
 
-	ctx := experiment.NewContext(context.Background(), internal.ExperimentUnitPage)
-	body, sidenav, mobile, err := RenderParts(ctx, fset, d, RenderOptions{
+	ctx := context.Background()
+	parts, err := RenderParts(ctx, fset, d, RenderOptions{
 		FileLinkFunc:   func(string) string { return "file" },
 		SourceLinkFunc: func(ast.Node) string { return "src" },
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	bodyDoc, err := html.Parse(strings.NewReader(body.String()))
+	bodyDoc, err := html.Parse(strings.NewReader(parts.Body.String()))
 	if err != nil {
 		t.Fatal(err)
 	}
-	sidenavDoc, err := html.Parse(strings.NewReader(sidenav.String()))
+	sidenavDoc, err := html.Parse(strings.NewReader(parts.Outline.String()))
 	if err != nil {
 		t.Fatal(err)
 	}
-	mobileDoc, err := html.Parse(strings.NewReader(mobile.String()))
+	mobileDoc, err := html.Parse(strings.NewReader(parts.MobileOutline.String()))
 	if err != nil {
 		t.Fatal(err)
 	}
-
 	// Check that there are no duplicate id attributes.
 	t.Run("duplicate ids", func(t *testing.T) {
 		testDuplicateIDs(t, bodyDoc)
@@ -161,29 +117,37 @@ func TestRenderParts(t *testing.T) {
 		testIDsAndKinds(t, bodyDoc)
 	})
 
-	checker := htmlcheck.In(".Documentation-note",
-		htmlcheck.In("h3", htmlcheck.HasAttr("id", "pkg-note-BUG"), htmlcheck.HasExactText("Bugs ¶")),
-		htmlcheck.In("a", htmlcheck.HasHref("#pkg-note-BUG")))
+	checker := in(".Documentation-note",
+		in("h3", hasAttr("id", "pkg-note-BUG"), hasExactText("Bugs ¶")),
+		in("a", hasHref("#pkg-note-BUG")))
 	if err := checker(bodyDoc); err != nil {
 		t.Errorf("note check: %v", err)
 	}
 
-	checker = htmlcheck.In(".Documentation-index",
-		htmlcheck.In(".Documentation-indexNote", htmlcheck.In("a", htmlcheck.HasHref("#pkg-note-BUG"), htmlcheck.HasExactText("Bugs"))))
+	checker = in(".Documentation-index",
+		in(".Documentation-indexNote", in("a", hasHref("#pkg-note-BUG"), hasExactText("Bugs"))))
 	if err := checker(bodyDoc); err != nil {
 		t.Errorf("note check: %v", err)
 	}
 
-	checker = htmlcheck.In(".DocNav-notes",
-		htmlcheck.In("#nav-group-notes", htmlcheck.In("li", htmlcheck.In("a", htmlcheck.HasHref("#pkg-note-BUG"), htmlcheck.HasExactText("Bugs")))))
+	checker = in(".DocNav-notes",
+		in("#nav-group-notes", in("li", in("a", hasHref("#pkg-note-BUG"), hasExactText("Bugs")))))
 	if err := checker(sidenavDoc); err != nil {
 		t.Errorf("note check: %v", err)
 	}
 
-	checker = htmlcheck.In("#DocNavMobile-select",
-		htmlcheck.In("optgroup[label=Notes]", htmlcheck.In("option", htmlcheck.HasAttr("value", "pkg-note-BUG"), htmlcheck.HasExactText("Bugs"))))
+	checker = in("#DocNavMobile-select",
+		in("optgroup[label=Notes]", in("option", hasAttr("value", "pkg-note-BUG"), hasExactText("Bugs"))))
 	if err := checker(mobileDoc); err != nil {
 		t.Errorf("note check: %v", err)
+	}
+
+	wantLinks := []render.Link{
+		{Href: "https://go.googlesource.com/pkgsite", Text: "pkgsite repo"},
+		{Href: "https://play-with-go.dev", Text: "Play with Go"},
+	}
+	if diff := cmp.Diff(wantLinks, parts.Links); diff != "" {
+		t.Errorf("links mismatch (-want, +got):\n%s", diff)
 	}
 }
 
@@ -285,9 +249,9 @@ func main() {
 </pre>
 </div>
 <div class="Documentation-exampleButtonsContainer">
-				<p class="Documentation-exampleError" role="alert" aria-atomic="true"></p>
-				<button class="Documentation-examplePlayButton" aria-label="Play Code">Play</button>
-			</div></details>`,
+        <p class="Documentation-exampleError" role="alert" aria-atomic="true"></p>
+        <button class="Documentation-examplePlayButton" aria-label="Play Code">Play</button>
+      </div></details>`,
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {

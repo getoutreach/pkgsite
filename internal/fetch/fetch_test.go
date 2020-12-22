@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -105,7 +106,7 @@ func TestFetchModule(t *testing.T) {
 				sortFetchResult(fr)
 				sortFetchResult(got)
 				opts := []cmp.Option{
-					cmpopts.IgnoreFields(internal.Documentation{}, "HTML", "Source"),
+					cmpopts.IgnoreFields(internal.Documentation{}, "Source"),
 					cmpopts.IgnoreFields(internal.PackageVersionState{}, "Error"),
 					cmpopts.IgnoreFields(FetchResult{}, "Defer"),
 					cmp.AllowUnexported(source.Info{}),
@@ -127,11 +128,32 @@ func TestFetchModule(t *testing.T) {
 				if diff := cmp.Diff(fr, got, opts...); diff != "" {
 					t.Fatalf("mismatch (-want +got):\n%s", diff)
 				}
-				validateDocumentationHTML(t, got.Module, fr.Module)
+				validateDocumentationHTML(t, got.Module, test.mod.docStrings)
 			})
 		}
 	}
 }
+
+// validateDocumentationHTML checks that the doc HTMLs for units in the module
+// contain a set of substrings.
+func validateDocumentationHTML(t *testing.T, got *internal.Module, want map[string][]string) {
+	ctx := context.Background()
+	for _, u := range got.Units {
+		if wantStrings := want[u.Path]; wantStrings != nil {
+			parts, err := godoc.RenderPartsFromUnit(ctx, u)
+			if err != nil && !errors.Is(err, godoc.ErrTooLarge) {
+				t.Fatal(err)
+			}
+			gotDoc := parts.Body.String()
+			for _, w := range wantStrings {
+				if !strings.Contains(gotDoc, w) {
+					t.Errorf("doc for %s:\nmissing %q; got\n%q", u.Path, w, gotDoc)
+				}
+			}
+		}
+	}
+}
+
 func TestFetchModule_Errors(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
